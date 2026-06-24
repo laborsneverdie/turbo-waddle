@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>用户列表 · 管理员</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+</head>
+<body>
+  <div id="app">
+    <nav class="nav">
+      <div class="brand">📮 求职推荐</div>
+      <div class="menu">
+        <a href="./index.html">填写信息</a>
+        <a href="./admin.html" class="active">用户列表</a>
+      </div>
+    </nav>
+
+    <div class="container">
+      <div class="card">
+        <h1>数据总览</h1>
+        <p class="sub">实时显示用户提交数量与岗位库规模</p>
+        <div class="stat-grid">
+          <div class="stat"><div class="num">{{stats.users}}</div><div class="label">用户提交</div></div>
+          <div class="stat"><div class="num">{{stats.stateOwned}}</div><div class="label">国企岗位</div></div>
+          <div class="stat"><div class="num">{{stats.privateForeign}}</div><div class="label">私企/外企</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>用户列表（最近 {{list.length}} 条）</h2>
+        <p class="sub">支持查看、删除，可做简易管理使用。</p>
+        <div v-if="loading" class="empty">加载中…</div>
+        <div v-else-if="!list.length" class="empty">暂无用户提交数据</div>
+        <div v-else style="overflow-x:auto">
+          <table class="admin">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>城市</th>
+                <th>学历</th>
+                <th>经验</th>
+                <th>方向</th>
+                <th>邮箱</th>
+                <th class="hide-mobile">SendKey</th>
+                <th class="hide-mobile">时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="u in list" :key="u.id">
+                <td>{{u.id}}</td>
+                <td>{{u.city}}</td>
+                <td>{{u.education}}</td>
+                <td>{{u.experience}}</td>
+                <td>{{u.direction}}</td>
+                <td>{{u.email}}</td>
+                <td class="hide-mobile">{{u.sendkey || '-'}}</td>
+                <td class="hide-mobile">{{u.created_at}}</td>
+                <td><button class="danger" @click="removeUser(u.id)">删除</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" :class="{show: toast.show, error: toast.type==='error'}">{{toast.msg}}</div>
+  </div>
+
+  <script>
+    const { createApp, reactive, ref, onMounted } = Vue;
+    createApp({
+      setup() {
+        const list = ref([]);
+        const stats = reactive({ users: 0, stateOwned: 0, privateForeign: 0 });
+        const loading = ref(false);
+        const toast = reactive({ show: false, msg: '', type: 'ok' });
+
+        function showToast(msg, type='ok') {
+          toast.msg = msg; toast.type = type; toast.show = true;
+          setTimeout(() => toast.show = false, 2400);
+        }
+
+        async function load() {
+          loading.value = true;
+          try {
+            const [r1, r2] = await Promise.all([fetch('/api/users'), fetch('/api/stats')]);
+            const d1 = await r1.json();
+            const d2 = await r2.json();
+            list.value = d1.data || [];
+            Object.assign(stats, d2);
+          } catch (e) {
+            showToast('加载失败', 'error');
+          } finally {
+            loading.value = false;
+          }
+        }
+
+        async function removeUser(id) {
+          if (!confirm('确认删除该用户？')) return;
+          try {
+            const r = await fetch('/api/users/' + id, { method: 'DELETE' });
+            const d = await r.json();
+            if (!d.ok) throw new Error(d.msg);
+            showToast('已删除');
+            load();
+          } catch (e) {
+            showToast('删除失败', 'error');
+          }
+        }
+
+        onMounted(load);
+        return { list, stats, loading, removeUser, toast };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>

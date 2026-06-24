@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>岗位详情 · 求职推荐</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+</head>
+<body>
+  <div id="app">
+    <nav class="nav">
+      <div class="brand">📮 求职推荐</div>
+      <div class="menu">
+        <a href="./index.html">填写信息</a>
+        <a href="./admin.html">用户列表</a>
+      </div>
+    </nav>
+
+    <div class="container">
+      <!-- 加载中 -->
+      <div v-if="loading" class="card">
+        <div class="empty">加载中...</div>
+      </div>
+
+      <!-- 错误提示 -->
+      <div v-else-if="error" class="card">
+        <div class="empty">
+          <p>❌ {{ error }}</p>
+          <button class="btn btn-ghost" @click="goBack" style="margin-top: 16px;">← 返回</button>
+        </div>
+      </div>
+
+      <!-- 岗位详情 -->
+      <div v-else-if="job" class="card">
+        <div class="job-header">
+          <h1>{{ job.job_title }}</h1>
+          <div class="company-name">{{ job.company_name }}</div>
+          <div class="job-meta">
+            <span class="tag city">📍 {{ job.city }}</span>
+            <span class="tag">🎓 {{ job.education_req || '不限' }}</span>
+            <span class="tag">💼 {{ job.experience_req || '不限' }}</span>
+            <span class="tag salary">💰 {{ job.salary || '面议' }}</span>
+          </div>
+        </div>
+
+        <div class="job-section">
+          <h3>📋 岗位职责</h3>
+          <div class="job-content">{{ job.job_desc || '暂无描述' }}</div>
+        </div>
+
+        <div class="job-section">
+          <h3>🎯 岗位要求</h3>
+          <div class="job-content">
+            <ul>
+              <li>学历要求：{{ job.education_req || '不限' }}</li>
+              <li>经验要求：{{ job.experience_req || '不限' }}</li>
+              <li>工作地点：{{ job.city }}</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="job-section">
+          <h3>💼 公司介绍</h3>
+          <div class="job-content">
+            <p>{{ job.company_name }}是行业领先的国有企业/民营企业，提供良好的职业发展平台和福利待遇。</p>
+            <p>📅 发布时间：{{ job.publish_time || '近期' }}</p>
+          </div>
+        </div>
+
+        <div class="job-section">
+          <h3>📮 申请方式</h3>
+          <div class="job-content">
+            <p>请通过以下方式投递简历：</p>
+            <ul>
+              <li>📧 邮箱投递：hr@{{ companyDomain }}.com</li>
+              <li>
+                🌐 官网投递：
+                <a v-if="companyUrl" :href="companyUrl" target="_blank" rel="noopener" class="official-link">
+                  {{ companyUrl }}
+                </a>
+                <span v-else>www.{{ companyDomain }}.com</span>
+              </li>
+              <li>📱 招聘平台：可在<a href="https://www.zhaopin.com" target="_blank" rel="noopener">智联招聘</a>、<a href="https://www.51job.com" target="_blank" rel="noopener">前程无忧</a>、<a href="https://www.zhipin.com" target="_blank" rel="noopener">BOSS直聘</a>搜索该岗位</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="job-actions">
+          <button class="btn btn-primary" @click="goBack">← 返回推荐列表</button>
+          <button class="btn btn-ghost" @click="copyJobInfo">📋 复制岗位信息</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" :class="{show: toast.show}">{{ toast.msg }}</div>
+  </div>
+
+  <script>
+    const { createApp, reactive, ref, onMounted, computed } = Vue;
+
+    // 公司官网映射表（基于真实公司）
+    const COMPANY_WEBSITES = {
+      '中国中车株洲所': 'https://www.crrcgc.cc/zz',
+      '中国移动研究院': 'https://cmri.chinamobile.com',
+      '中国南方航空': 'https://www.csair.com',
+      '中国二重集团': 'https://www.china-erzhong.com',
+      '天津港集团': 'https://www.ptacn.com',
+      '国家电网湖南公司': 'https://www.sgcc.com.cn',
+      '中国石油': 'https://www.cnpc.com.cn',
+      '中国电子科技集团': 'https://www.cetc.com.cn',
+      '招商局集团': 'https://www.cmhk.com',
+      '东风汽车集团': 'https://www.dfmc.com.cn',
+      '中国电信集团': 'https://www.chinatelecom.com.cn',
+      '国家电网': 'https://www.sgcc.com.cn',
+      '中国工商银行': 'https://www.icbc.com.cn',
+      '中国航天科工': 'https://www.casic.com.cn',
+      '中国银联': 'https://www.unionpay.com',
+      '湖南广电集团': 'https://www.hunantv.com',
+      '中国建筑': 'https://www.cscec.com.cn',
+      '浪潮集团': 'https://www.inspur.com',
+      '中国一汽集团': 'https://www.faw.com.cn',
+      '长安汽车集团': 'https://www.changan.com.cn',
+      '宁波舟山港集团': 'https://www.nbport.com.cn',
+      '中国电科海康集团': 'https://www.hikvision.com',
+      '贵州茅台集团': 'https://www.moutaichina.com',
+      '南方电网': 'https://www.csg.cn',
+      '中联重科': 'https://www.zoomlion.com',
+      '中国联通湖南分公司': 'https://www.chinaunicom.com.cn',
+      '中国铁建湖南分公司': 'https://www.crcc.cn',
+      '中国航天三江集团': 'https://www.cssg.com.cn',
+      '浙江省交通投资集团': 'https://www.cncico.com',
+      '中国电子科技集团十四所': 'https://www.cetc.com.cn',
+      '苏宁云商': 'https://www.suning.com',
+      '中国中车戚墅堰所': 'https://www.crrcgc.cc',
+      '中国电子科技集团三十所': 'https://www.cetc.com.cn',
+      '中国西电集团': 'https://www.xd.com.cn',
+      '陕西电子信息集团': 'https://www.sxelec.com',
+      '中国汽车技术研究中心': 'https://www.catarc.ac.cn',
+      '中国兵器装备集团': 'https://www.csgc.com.cn',
+      '中国电子科技集团三十八所': 'https://www.cetc.com.cn',
+      '江淮汽车集团': 'https://www.jac.com.cn',
+      '厦门建发集团': 'https://www.chinacnd.com',
+      '福建省电子信息集团': 'https://www.feig.com.cn',
+      '山东港口集团': 'https://www.sd-port.com',
+      '河南能源化工集团': 'https://www.hnecgc.com.cn',
+      '中国一拖集团': 'https://www.yituo.com.cn',
+      '中国航空工业集团沈飞': 'https://www.sac.com.cn',
+      '大连港集团': 'https://www.dlport.cn',
+      '哈电集团': 'https://www.harbin-electric.com',
+      '江西铜业集团': 'https://www.jxcc.com',
+      '河钢集团': 'https://www.hbisco.com',
+      '中车唐山公司': 'https://www.crrcgc.cc/ts',
+      '晋能控股集团': 'https://www.jinnengkg.com',
+      '云南白药集团': 'https://www.yunnanbaiyao.com.cn',
+      '广西柳工集团': 'https://www.liugong.com',
+      '内蒙古电力集团': 'https://www.impc.com.cn',
+      '金川集团': 'https://www.jnmc.com',
+      '海南农垦集团': 'https://www.hainanfarm.com.cn',
+      '西藏天路集团': 'https://www.xztianlu.com',
+      '宁夏能源集团': 'https://www.nxnyjt.com',
+      '青海盐湖工业集团': 'https://www.qhyhgy.com',
+      '新疆中泰集团': 'https://www.zthx.com',
+      '中国邮政储蓄银行': 'https://www.psbc.com',
+      // 私企
+      '万兴科技': 'https://www.wondershare.cn',
+      '美团': 'https://www.meituan.com',
+      '字节跳动': 'https://www.bytedance.com',
+      '三一重工': 'https://www.sany.com.cn',
+      '兴盛优选': 'https://www.xsyxsc.com',
+      '阿里巴巴': 'https://www.alibaba.com',
+      '腾讯': 'https://www.tencent.com',
+      '顺丰科技': 'https://www.sf-tech.com.cn',
+      '拼多多': 'https://www.pinduoduo.com',
+      '网易': 'https://www.163.com',
+      '芒果 TV': 'https://www.mgtv.com',
+      '小米': 'https://www.mi.com',
+      '安克创新': 'https://www.anker.com',
+      '斗鱼': 'https://www.douyu.com',
+      '小红书': 'https://www.xiaohongshu.com',
+      '科大讯飞': 'https://www.iflytek.com',
+      '百词斩': 'https://www.baicizhan.com',
+      '大疆创新': 'https://www.dji.com',
+      '唯品会': 'https://www.vip.com',
+      '菜鸟网络': 'https://www.cainiao.com',
+      '哔哩哔哩': 'https://www.bilibili.com',
+      '极米科技': 'https://www.xgimi.com',
+      '金山办公': 'https://www.wps.cn',
+      '孩子王': 'https://www.haiziwang.com',
+      '途牛旅游': 'https://www.tuniu.com',
+      '中科创达': 'https://www.thundersoft.com',
+      '核桃编程': 'https://www.hetao101.com',
+      '融创文旅': 'https://www.sunac.com.cn',
+      '猪八戒网': 'https://www.zbj.com',
+      '江小白': 'https://www.ijovo.com',
+      '美图公司': 'https://www.meitu.com',
+      '4399游戏': 'https://www.4399.com',
+      '浪潮信息': 'https://www.inspursystems.com',
+      '海尔智家': 'https://www.haier.com',
+      '蜜雪冰城': 'https://www.mxbc.com',
+      '网龙网络': 'https://www.nd.com.cn',
+      '东软集团': 'https://www.neusoft.com',
+      '亿达信息': 'https://www.yidatec.com',
+      '修正药业': 'https://www.xiuzheng.com',
+      '飞鹤乳业': 'https://www.feihe.com',
+      '仁和药业': 'https://www.renhe.com',
+      '以岭药业': 'https://www.yiling.cn',
+      '美特好': 'https://www.meetall.com.cn',
+      '云南白药': 'https://www.yunnanbaiyao.com.cn',
+      '满帮集团': 'https://www.fulltruckalliance.com',
+      '柳工机械': 'https://www.liugong.com',
+      '伊利集团': 'https://www.yili.com',
+      '奇正藏药': 'https://www.cheezheng.com.cn',
+      '海航科技': 'https://www.hna.com',
+      '西藏奇正藏药': 'https://www.cheezheng.com.cn',
+      '共享集团': 'https://www.kocel.com',
+      '青海互助青稞酒': 'https://www.huzhuqingke.com',
+      '特变电工': 'https://www.tbea.com',
+      '微软': 'https://www.microsoft.com',
+    };
+
+    createApp({
+      setup() {
+        const job = ref(null);
+        const loading = ref(true);
+        const error = ref('');
+        const toast = reactive({ show: false, msg: '' });
+
+        const companyDomain = computed(() => {
+          if (!job.value) return '';
+          const name = job.value.company_name || '';
+          return name.replace(/[^\w]/g, '').toLowerCase();
+        });
+
+        const companyUrl = computed(() => {
+          if (!job.value) return '';
+          const name = job.value.company_name || '';
+          // 先从映射表查找
+          if (COMPANY_WEBSITES[name]) return COMPANY_WEBSITES[name];
+          // 如果没有，尝试用 job_url
+          if (job.value.job_url && !job.value.job_url.includes('example.com')) {
+            return job.value.job_url;
+          }
+          // 兜底：生成域名
+          return 'https://www.' + companyDomain.value + '.com';
+        });
+
+        function showToast(msg) {
+          toast.msg = msg;
+          toast.show = true;
+          setTimeout(() => toast.show = false, 2000);
+        }
+
+        function goBack() {
+          window.history.back();
+        }
+
+        function copyJobInfo() {
+          if (!job.value) return;
+          const text = `岗位：${job.value.job_title}\n公司：${job.value.company_name}\n地点：${job.value.city}\n薪资：${job.value.salary || '面议'}\n要求：${job.value.education_req || '不限'} | ${job.value.experience_req || '不限'}\n描述：${job.value.job_desc || '暂无'}`;
+          navigator.clipboard.writeText(text).then(() => {
+            showToast('✅ 已复制到剪贴板');
+          }).catch(() => {
+            showToast('❌ 复制失败');
+          });
+        }
+
+        async function loadJob() {
+          const params = new URLSearchParams(window.location.search);
+          const id = params.get('id');
+
+          if (!id) {
+            error.value = '缺少岗位ID参数';
+            loading.value = false;
+            return;
+          }
+
+          try {
+            const savedJobs = sessionStorage.getItem('lastRecommendedJobs');
+            if (savedJobs) {
+              const jobs = JSON.parse(savedJobs);
+              const found = jobs.find(j => String(j.id) === String(id));
+              if (found) {
+                job.value = found;
+                loading.value = false;
+                return;
+              }
+            }
+
+            error.value = '未找到该岗位详情，请从推荐列表重新进入';
+          } catch (e) {
+            error.value = '加载失败：' + e.message;
+          } finally {
+            loading.value = false;
+          }
+        }
+
+        onMounted(loadJob);
+
+        return { job, loading, error, toast, goBack, copyJobInfo, companyDomain, companyUrl };
+      }
+    }).mount('#app');
+  </script>
+
+  <style>
+    .job-header {
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .job-header h1 {
+      margin: 0 0 8px 0;
+      font-size: 24px;
+      color: #111827;
+    }
+    .company-name {
+      font-size: 16px;
+      color: #6b7280;
+      margin-bottom: 12px;
+    }
+    .job-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .job-section {
+      margin-bottom: 24px;
+    }
+    .job-section h3 {
+      font-size: 16px;
+      color: #374151;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .job-content {
+      color: #4b5563;
+      line-height: 1.8;
+    }
+    .job-content ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .job-content li {
+      margin-bottom: 8px;
+    }
+    .job-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 32px;
+      padding-top: 20px;
+      border-top: 1px solid #e5e7eb;
+    }
+    .btn-primary {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn-primary:hover {
+      background: #1d4ed8;
+    }
+    .official-link {
+      color: #2563eb;
+      text-decoration: underline;
+      font-weight: 500;
+    }
+    .official-link:hover {
+      color: #1d4ed8;
+    }
+  </style>
+</body>
+</html>

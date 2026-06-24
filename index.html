@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#2563eb" />
+    <title>求职推荐 · 填写信息</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <nav class="nav">
+        <div class="brand">📮 求职推荐</div>
+        <div class="menu">
+          <a href="./index.html" class="active">填写信息</a>
+          <a href="./admin.html">用户列表</a>
+        </div>
+      </nav>
+
+      <div class="container">
+        <!-- 表单卡片 -->
+        <div v-if="!showResult" class="card">
+          <h1>填写你的求职信息</h1>
+          <p class="sub">我们会根据你的信息，优先推荐国企岗位（70%），并搭配部分优质私企/外企岗位（30%）。</p>
+
+          <div class="subscribe-note">
+            <span class="sub-icon">🔔</span>
+            <span>订阅后将通过你的微信 SendKey <strong>每 8 小时自动推送一次岗位推荐</strong>，不错过任何机会。</span>
+          </div>
+
+          <form @submit.prevent="submitForm">
+            <div class="form-row">
+              <div class="field">
+                <label>常住城市<span class="req">*</span></label>
+                <input v-model="form.city" placeholder="如：北京" required />
+              </div>
+              <div class="field">
+                <label>最高学历<span class="req">*</span></label>
+                <select v-model="form.education" required>
+                  <option value="">请选择</option>
+                  <option v-for="opt in options.education" :key="opt" :value="opt">{{opt}}</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field">
+                <label>工作年限<span class="req">*</span></label>
+                <select v-model="form.experience" required>
+                  <option value="">请选择</option>
+                  <option v-for="opt in options.experience" :key="opt" :value="opt">{{opt}}</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>求职方向<span class="req">*</span></label>
+                <input v-model="form.direction" placeholder="如：前端开发" required />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field full">
+                <label>专业资质与权威证书<span class="req">*</span></label>
+                <textarea v-model="form.qualification" placeholder="请描述你的专业资质和权威证书，如：&#10;• 持有中级会计职称 / CPA证书&#10;• 熟练掌握用友NC、金蝶财务软件&#10;• 熟悉企业会计准则和税法&#10;（越详细越能精准匹配岗位）" rows="4" required></textarea>
+                <div class="tip">填写专业资质和权威证书是精准匹配岗位的关键，请务必认真填写。</div>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field full">
+                <label>擅长技能</label>
+                <input v-model="form.skills" placeholder="如：JavaScript, Python, 数据分析, SQL（用逗号或空格分隔）" />
+                <div class="tip">填写擅长技能可帮助我们更精准地匹配岗位。</div>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field">
+                <label>个人邮箱<span class="req">*</span></label>
+                <input type="email" v-model="form.email" placeholder="name@example.com" required />
+              </div>
+              <div class="field">
+                <label>微信推送 SendKey</label>
+                <input v-model="form.sendkey" placeholder="可选，用于微信 Server酱 SendKey" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field full" style="margin-top:6px">
+                <button type="submit" class="btn btn-block" :disabled="loading">
+                  {{ loading ? '提交中…' : '提交并查看推荐' }}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <!-- 提交成功 + 推荐结果 -->
+        <div v-if="showResult" class="card">
+          <!-- 成功提示 -->
+          <div class="success-banner">
+            <div class="success-icon">✅</div>
+            <div class="success-text">
+              <h2>提交成功！</h2>
+              <p>你的求职信息已保存，以下是为你匹配的岗位推荐。</p>
+            </div>
+          </div>
+
+          <!-- 结果统计 -->
+          <div v-if="result && result.jobs" class="section-title">
+            <h2>📇 匹配结果</h2>
+            <span class="badge">共 {{ result.jobs.length }} 个岗位</span>
+          </div>
+
+          <!-- 空结果提示 -->
+          <div v-if="!result || !result.jobs || result.jobs.length === 0" class="empty">
+            <p>📭 暂无匹配的岗位</p>
+            <p class="tip">请先通过接口向岗位库中添加数据（state_owned_jobs / private_jobs），再重新提交。</p>
+          </div>
+
+          <!-- 岗位列表 -->
+          <div v-if="result && result.jobs && result.jobs.length > 0" class="job-grid">
+            <div v-for="job in result.jobs" :key="job.id" class="job">
+              <div class="title">{{job.job_title}}</div>
+              <div class="company">{{job.company_name}}</div>
+              <div class="meta">
+                <span class="tag city">📍 {{job.city}}</span>
+                <span class="tag">🎓 {{job.education_req}}</span>
+                <span class="tag">💼 {{job.experience_req}}</span>
+                <span class="tag salary">💰 {{job.salary}}</span>
+              </div>
+              <div v-if="job.job_desc" class="duties">{{job.job_desc}}</div>
+              <div class="foot">
+                <span>发布：{{job.publish_time}}</span>
+                <a :href="'./job-detail.html?id=' + job.id" target="_blank" rel="noopener">查看招聘详情 →</a>
+              </div>
+            </div>
+          </div>
+
+          <!-- 返回按钮 -->
+          <div style="margin-top: 24px; text-align: center;">
+            <button class="btn btn-ghost" @click="backToForm">← 返回重新填写</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="toast" :class="{show: toast.show, error: toast.type==='error'}">{{toast.msg}}</div>
+    </div>
+
+    <script>
+      const { createApp, reactive, ref } = Vue;
+      createApp({
+        setup() {
+          const form = reactive({ city: '', education: '', experience: '', direction: '', qualification: '', skills: '', email: '', sendkey: '' });
+          const options = {
+            education: ['大专', '双非本科', '211本科', '985本科', '双非硕士', '211硕士', '985硕士', '博士'],
+            experience: ['应届', '1年以下', '1-3年', '3-5年', '5-10年', '10年以上']
+          };
+          const loading = ref(false);
+          const result = ref(null);
+          const showResult = ref(false);
+          const toast = reactive({ show: false, msg: '', type: 'ok' });
+
+          function showToast(msg, type) {
+            toast.msg = msg; toast.type = type; toast.show = true;
+            setTimeout(function() { toast.show = false; }, 3000);
+          }
+
+          function backToForm() {
+            showResult.value = false;
+            result.value = null;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+
+          async function submitForm() {
+            if (loading.value) return;
+            loading.value = true;
+            try {
+              var r1 = await fetch('/api/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(form)
+              });
+              var d1 = await r1.json();
+              if (!d1.ok) {
+                showToast('❌ ' + (d1.msg || '提交失败'), 'error');
+                return;
+              }
+
+              var r2 = await fetch('/api/recommend', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: d1.id })
+              });
+              var d2 = await r2.json();
+
+              result.value = d2;
+              showResult.value = true;
+              // 保存岗位数据到 sessionStorage，供详情页使用
+              try { sessionStorage.setItem('lastRecommendedJobs', JSON.stringify(d2.jobs || [])); } catch(e) {}
+              showToast('✅ 提交成功，已为你生成岗位推荐！', 'ok');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            } catch (e) {
+              showToast('❌ 网络错误，请检查服务是否启动', 'error');
+            } finally {
+              loading.value = false;
+            }
+          }
+          return { form, options, loading, submitForm, result, showResult, backToForm, toast };
+        }
+      }).mount('#app');
+    </script>
+  </body>
+</html>
