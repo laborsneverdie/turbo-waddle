@@ -1,7 +1,4 @@
 {
-  "build": {
-    "nodeVersion": "18.x"
-  },
   "crons": [
     {
       "path": "/api/cron",
