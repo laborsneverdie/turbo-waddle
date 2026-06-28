@@ -16,14 +16,17 @@ from openai import OpenAI
 # ============ 初始化客户端 ============
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 
-if not all([SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY]):
-    raise EnvironmentError("缺少必要环境变量：SUPABASE_URL / SUPABASE_KEY / OPENAI_API_KEY")
+if not all([SUPABASE_URL, SUPABASE_KEY, DEEPSEEK_API_KEY]):
+    raise EnvironmentError("缺少必要环境变量：SUPABASE_URL / SUPABASE_KEY / DEEPSEEK_API_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-ai_client = OpenAI(api_key=OPENAI_API_KEY)
+ai_client = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com"
+)
 
 
 # ============ 读取用户 ============
@@ -53,7 +56,7 @@ def generate_recommendations(user: dict) -> list[dict]:
 只返回 JSON 数组，不要任何额外文字。
 """
     resp = ai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
     )
