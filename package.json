@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
+<<<<<<< Updated upstream
     "node": "18.x"
+=======
+    "node": "22.23.0"
+>>>>>>> Stashed changes
   },
   "scripts": {
     "dev": "next dev",
@@ -12,20 +16,23 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.0",
+    "dotenv": "^17.4.2",
     "next": "14.2.35",
+    "pdfkit": "^0.19.1",
+    "pg": "^8.22.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "@supabase/supabase-js": "^2.49.0"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "tailwindcss": "^3.4.0",
-    "postcss": "^8.4.0",
     "autoprefixer": "^10.4.0",
     "eslint": "^8.57.0",
-    "eslint-config-next": "14.2.35"
+    "eslint-config-next": "14.2.35",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.7.0"
   }
 }
