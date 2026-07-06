@@ -1,28 +1,49 @@
 """
 岗位推荐脚本（每8小时由 GitHub Actions 触发）
 流程：
-  1. 从 Supabase 读取所有用户资料
-  2. 调用 OpenAI 根据用户画像生成 3 条推荐岗位
+  1. 从 Supabase 读取所有用户资料（PostgreSQL 直连，绕过 PostgREST）
+  2. 调用 DeepSeek 根据用户画像生成 3 条推荐岗位
   3. 写入 Supabase 的 job_recommendations 表
   4. 通过 PushPlus 推送微信通知
 """
 
 import os
+import sys
 import json
-import requests
-from supabase import create_client, Client
+import traceback
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from openai import OpenAI
 
 # ============ 初始化客户端 ============
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 
-if not all([SUPABASE_URL, SUPABASE_KEY, DEEPSEEK_API_KEY]):
-    raise EnvironmentError("缺少必要环境变量：SUPABASE_URL / SUPABASE_KEY / DEEPSEEK_API_KEY")
+print("=" * 50)
+print("[环境检查]")
+print(f"  DATABASE_URL 已设置: {bool(DATABASE_URL)}")
+print(f"  DEEPSEEK_API_KEY 已设置: {bool(DEEPSEEK_API_KEY)}")
+print(f"  PUSHPLUS_TOKEN 已设置: {bool(PUSHPLUS_TOKEN)}")
+print("=" * 50)
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+if not DATABASE_URL:
+    print("[错误] 缺少环境变量 DATABASE_URL，请在 GitHub Secrets 中添加")
+    sys.exit(1)
+if not DEEPSEEK_API_KEY:
+    print("[错误] 缺少环境变量 DEEPSEEK_API_KEY，请在 GitHub Secrets 中添加")
+    sys.exit(1)
+
+# 连接数据库（Supabase 远程连接需要 SSL）
+try:
+    print("[数据库] 正在连接...")
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=15)
+    print("[数据库] 连接成功")
+except Exception as e:
+    print(f"[数据库] 连接失败: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
 ai_client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url="https://api.deepseek.com"
@@ -31,11 +52,12 @@ ai_client = OpenAI(
 
 # ============ 读取用户 ============
 def fetch_users():
-    resp = supabase.table("user_profiles").select("*").execute()
-    return resp.data or []
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM public.user_profiles ORDER BY created_at DESC")
+        return [dict(row) for row in cur.fetchall()]
 
 
-# ============ 调用 OpenAI 生成推荐 ============
+# ============ 调用 DeepSeek 生成推荐 ============
 def generate_recommendations(user: dict) -> list[dict]:
     prompt = f"""
 你是一名资深猎头，请根据以下求职者画像，推荐 3 个最匹配的岗位。
@@ -69,22 +91,18 @@ def generate_recommendations(user: dict) -> list[dict]:
 
 # ============ 写入 Supabase ============
 def save_recommendations(user_id: int, jobs: list[dict]):
-    rows = [
-        {
-            "user_id": user_id,
-            "job_title": j["job_title"],
-            "company": j["company"],
-            "enterprise_type": j["enterprise_type"],
-            "match_score": j["match_score"],
-            "detail_link": j["detail_link"],
-        }
-        for j in jobs
-    ]
-    supabase.table("job_recommendations").insert(rows).execute()
-    return rows
+    with conn.cursor() as cur:
+        for j in jobs:
+            cur.execute("""
+                INSERT INTO public.job_recommendations (user_id, job_title, company, enterprise_type, match_score, detail_link)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (user_id, j["job_title"], j["company"], j["enterprise_type"], j["match_score"], j["detail_link"]))
+        conn.commit()
+    return jobs
 
 
 # ============ PushPlus 微信推送 ============
+import requests as req_lib
 def push_wechat(user: dict, jobs: list[dict]):
     if not PUSHPLUS_TOKEN:
         return
@@ -97,7 +115,7 @@ def push_wechat(user: dict, jobs: list[dict]):
         )
     content = "\n".join(lines)
     try:
-        requests.post(
+        req_lib.post(
             "http://www.pushplus.plus/send",
             json={
                 "token": PUSHPLUS_TOKEN,
@@ -113,16 +131,32 @@ def push_wechat(user: dict, jobs: list[dict]):
 
 # ============ 主流程 ============
 def main():
-    users = fetch_users()
-    print(f"共读取到 {len(users)} 个用户")
-    for u in users:
-        try:
-            jobs = generate_recommendations(u)
-            saved = save_recommendations(u["id"], jobs)
-            push_wechat(u, saved)
-            print(f"用户 {u['id']} 推荐了 {len(saved)} 个岗位")
-        except Exception as e:
-            print(f"用户 {u.get('id')} 处理失败：{e}")
+    try:
+        users = fetch_users()
+        print(f"[主流程] 共读取到 {len(users)} 个用户")
+
+        if len(users) == 0:
+            print("[主流程] 没有用户数据，任务结束")
+            return
+
+        success_count = 0
+        fail_count = 0
+        for u in users:
+            try:
+                jobs = generate_recommendations(u)
+                saved = save_recommendations(u["id"], jobs)
+                push_wechat(u, saved)
+                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位")
+                success_count += 1
+            except Exception as e:
+                print(f"[主流程] 用户 {u.get('id')} 处理失败: {e}")
+                traceback.print_exc()
+                fail_count += 1
+
+        print(f"[主流程] 完成！成功 {success_count} 个，失败 {fail_count} 个")
+    finally:
+        conn.close()
+        print("[数据库] 连接已关闭")
 
 
 if __name__ == "__main__":
