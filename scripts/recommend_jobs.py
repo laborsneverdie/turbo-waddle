@@ -1,9 +1,11 @@
 """
 岗位推荐脚本（每8小时由 GitHub Actions 触发）
+使用 Supabase REST API，不依赖数据库直连，避免端口 5432 不可达问题
+
 流程：
-  1. 从 Supabase 读取所有用户资料（PostgreSQL 直连，绕过 PostgREST）
+  1. 通过 REST API 读取所有用户资料
   2. 调用 DeepSeek 根据用户画像生成 3 条推荐岗位
-  3. 写入 Supabase 的 job_recommendations 表
+  3. 通过 REST API 写入 job_recommendations 表
   4. 通过 PushPlus 推送微信通知
 """
 
@@ -11,37 +13,31 @@ import os
 import sys
 import json
 import traceback
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import requests
 from openai import OpenAI
 
 # ============ 初始化客户端 ============
-DATABASE_URL = os.environ.get("DATABASE_URL")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")  # service_role key（绕过 RLS）
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_APL_KEY")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 
 print("=" * 50)
 print("[环境检查]")
-print(f"  DATABASE_URL 已设置: {bool(DATABASE_URL)}")
+print(f"  SUPABASE_URL 已设置: {bool(SUPABASE_URL)}")
+print(f"  SUPABASE_KEY 已设置: {bool(SUPABASE_KEY)}")
 print(f"  DEEPSEEK_API_KEY 已设置: {bool(DEEPSEEK_API_KEY)}")
 print(f"  PUSHPLUS_TOKEN 已设置: {bool(PUSHPLUS_TOKEN)}")
 print("=" * 50)
 
-if not DATABASE_URL:
-    print("[错误] 缺少环境变量 DATABASE_URL，请在 GitHub Secrets 中添加")
+if not SUPABASE_URL:
+    print("[错误] 缺少环境变量 SUPABASE_URL，请在 GitHub Secrets 中添加")
+    sys.exit(1)
+if not SUPABASE_KEY:
+    print("[错误] 缺少环境变量 SUPABASE_KEY，请在 GitHub Secrets 中添加")
     sys.exit(1)
 if not DEEPSEEK_API_KEY:
     print("[错误] 缺少环境变量 DEEPSEEK_API_KEY，请在 GitHub Secrets 中添加")
-    sys.exit(1)
-
-# 连接数据库（Supabase 远程连接需要 SSL）
-try:
-    print("[数据库] 正在连接...")
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=15)
-    print("[数据库] 连接成功")
-except Exception as e:
-    print(f"[数据库] 连接失败: {e}")
-    traceback.print_exc()
     sys.exit(1)
 
 ai_client = OpenAI(
@@ -49,12 +45,30 @@ ai_client = OpenAI(
     base_url="https://api.deepseek.com"
 )
 
+# Supabase REST API 请求头（使用 service_role key 绕过 RLS）
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
+
 
 # ============ 读取用户 ============
 def fetch_users():
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM public.user_profiles ORDER BY created_at DESC")
-        return [dict(row) for row in cur.fetchall()]
+    """通过 REST API 读取所有用户资料"""
+    print("[数据库] 正在通过 REST API 读取用户...")
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/user_profiles?order=created_at.desc",
+        headers=HEADERS,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        print(f"[数据库] 读取失败 HTTP {resp.status_code}: {resp.text}")
+        resp.raise_for_status()
+    users = resp.json()
+    print(f"[数据库] 读取成功，共 {len(users)} 个用户")
+    return users
 
 
 # ============ 调用 DeepSeek 生成推荐 ============
@@ -89,20 +103,31 @@ def generate_recommendations(user: dict) -> list[dict]:
     return json.loads(content)
 
 
-# ============ 写入 Supabase ============
+# ============ 写入推荐结果 ============
 def save_recommendations(user_id: int, jobs: list[dict]):
-    with conn.cursor() as cur:
-        for j in jobs:
-            cur.execute("""
-                INSERT INTO public.job_recommendations (user_id, job_title, company, enterprise_type, match_score, detail_link)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (user_id, j["job_title"], j["company"], j["enterprise_type"], j["match_score"], j["detail_link"]))
-        conn.commit()
+    """通过 REST API 写入推荐结果"""
+    for j in jobs:
+        payload = {
+            "user_id": user_id,
+            "job_title": j["job_title"],
+            "company": j["company"],
+            "enterprise_type": j["enterprise_type"],
+            "match_score": j["match_score"],
+            "detail_link": j["detail_link"],
+        }
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/job_recommendations",
+            headers=HEADERS,
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            print(f"[数据库] 写入失败 HTTP {resp.status_code}: {resp.text}")
+            resp.raise_for_status()
     return jobs
 
 
 # ============ PushPlus 微信推送 ============
-import requests as req_lib
 def push_wechat(user: dict, jobs: list[dict]):
     if not PUSHPLUS_TOKEN:
         return
@@ -115,7 +140,7 @@ def push_wechat(user: dict, jobs: list[dict]):
         )
     content = "\n".join(lines)
     try:
-        req_lib.post(
+        requests.post(
             "http://www.pushplus.plus/send",
             json={
                 "token": PUSHPLUS_TOKEN,
@@ -154,9 +179,10 @@ def main():
                 fail_count += 1
 
         print(f"[主流程] 完成！成功 {success_count} 个，失败 {fail_count} 个")
-    finally:
-        conn.close()
-        print("[数据库] 连接已关闭")
+    except Exception as e:
+        print(f"[主流程] 致命错误: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

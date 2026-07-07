@@ -26,7 +26,8 @@ jobs:
 
       - name: 执行推荐脚本
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_APL_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: python scripts/recommend_jobs.py
