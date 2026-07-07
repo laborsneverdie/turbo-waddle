@@ -319,31 +319,93 @@ def generate_docx_report(user: dict, jobs: list[dict]) -> str:
     return filepath
 
 
+# ============ 上传报告到 Supabase Storage ============
+STORAGE_BUCKET = "reports"  # 需要在 Supabase 创建名为 reports 的公开 bucket
+
+
+def upload_to_storage(filepath: str) -> str | None:
+    """上传 docx 到 Supabase Storage，返回公开下载链接；失败则返回 None"""
+    filename = os.path.basename(filepath)
+    try:
+        with open(filepath, "rb") as f:
+            file_data = f.read()
+        upload_headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+        resp = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{filename}",
+            headers=upload_headers,
+            data=file_data,
+            timeout=60,
+        )
+        if resp.status_code in (200, 201):
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}/{filename}"
+            print(f"[Storage] 上传成功，公开链接: {public_url}")
+            return public_url
+        else:
+            print(f"[Storage] 上传失败 HTTP {resp.status_code}: {resp.text}")
+            return None
+    except Exception as e:
+        print(f"[Storage] 上传异常: {e}")
+        return None
+
+
 # ============ PushPlus 微信推送 ============
-def push_wechat(user: dict, jobs: list[dict]):
+def push_wechat(user: dict, jobs: list[dict], download_url: str | None = None):
     if not PUSHPLUS_TOKEN:
         return
     title = f"岗位推荐：{user.get('field', '求职方向')}"
-    lines = [f"城市：{user.get('city')} | 学历：{user.get('degree')}"]
+    # 使用 Markdown 模板，内容包含完整岗位详情 + 下载链接
+    md_lines = [
+        f"## 📋 岗位推荐报告",
+        f"",
+        f"**求职者信息**",
+        f"- 城市：{user.get('city', '—')}",
+        f"- 学历：{user.get('degree', '—')}",
+        f"- 工作经验：{user.get('experience', '—')}",
+        f"- 求职方向：{user.get('field', '—')}",
+        f"",
+        f"---",
+        f"",
+    ]
     for i, j in enumerate(jobs, 1):
-        lines.append(
-            f"{i}. {j['job_title']} @ {j['company']}（{j['enterprise_type']}）"
-            f" 匹配度 {j['match_score']}%"
-            f" 薪资 {j.get('salary_range', '面议')}"
-        )
-    lines.append("\n详细岗位说明已生成 docx 报告，请前往 GitHub Actions 下载")
-    content = "\n".join(lines)
+        md_lines.append(f"### {i}. {j['job_title']}")
+        md_lines.append(f"")
+        md_lines.append(f"| 项目 | 详情 |")
+        md_lines.append(f"|------|------|")
+        md_lines.append(f"| 公司 | {j.get('company', '—')}（{j.get('enterprise_type', '—')}）|")
+        md_lines.append(f"| 匹配度 | **{j.get('match_score', 0)}%** |")
+        md_lines.append(f"| 薪资 | {j.get('salary_range', '面议')} |")
+        if j.get('work_location'):
+            md_lines.append(f"| 地点 | {j['work_location']} |")
+        md_lines.append(f"")
+        md_lines.append(f"---")
+        md_lines.append(f"")
+    # 下载链接
+    if download_url:
+        md_lines.append(f"📥 **[点击下载完整岗位推荐报告（docx）]({download_url})**")
+        md_lines.append(f"")
+        md_lines.append(f"> 报告包含每个岗位的详细职责、任职要求、福利待遇、职业发展前景")
+    else:
+        md_lines.append(f"> 完整岗位推荐报告（docx）已生成，请前往 GitHub Actions 下载")
+    content = "\n".join(md_lines)
     try:
-        requests.post(
+        resp = requests.post(
             "http://www.pushplus.plus/send",
             json={
                 "token": PUSHPLUS_TOKEN,
                 "title": title,
                 "content": content,
-                "template": "txt",
+                "template": "markdown",
             },
-            timeout=10,
+            timeout=15,
         )
+        if resp.status_code == 200:
+            print(f"[PushPlus] 推送成功")
+        else:
+            print(f"[PushPlus] 推送返回 HTTP {resp.status_code}: {resp.text}")
     except Exception as e:
         print(f"[PushPlus] 推送失败：{e}")
 
@@ -368,8 +430,11 @@ def main():
                 saved = save_recommendations(u["id"], jobs)
                 report_path = generate_docx_report(u, saved)
                 generated_reports.append(report_path)
-                push_wechat(u, saved)
-                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位，报告已生成")
+                # 上传到 Supabase Storage 获取公开下载链接
+                download_url = upload_to_storage(report_path)
+                # 推送微信/邮箱，包含下载链接
+                push_wechat(u, saved, download_url)
+                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位，报告已生成并推送")
                 success_count += 1
             except Exception as e:
                 print(f"[主流程] 用户 {u.get('id')} 处理失败: {e}")
