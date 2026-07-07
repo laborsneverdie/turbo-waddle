@@ -31,3 +31,11 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_APL_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: python scripts/recommend_jobs.py
+
+      - name: 上传岗位推荐报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 岗位推荐报告_${{ github.run_id }}
+          path: reports/*.docx
+          retention-days: 30
