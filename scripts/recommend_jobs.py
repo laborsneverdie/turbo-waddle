@@ -312,7 +312,7 @@ def generate_docx_report(user: dict, jobs: list[dict]) -> str:
     # ---- 保存文件 ----
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     user_id = user.get('id', 'unknown')
-    filename = f"岗位推荐报告_用户{user_id}_{timestamp}.docx"
+    filename = f"job_report_user{user_id}_{timestamp}.docx"
     filepath = os.path.join(REPORT_DIR, filename)
     doc.save(filepath)
     print(f"[报告] 已生成: {filepath}")
