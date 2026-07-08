@@ -13,6 +13,7 @@
 import os
 import sys
 import json
+import html
 import traceback
 from datetime import datetime
 import requests
@@ -151,6 +152,129 @@ def save_recommendations(user_id: int, jobs: list[dict]):
             print(f"[数据库] 写入失败 HTTP {resp.status_code}: {resp.text}")
             resp.raise_for_status()
     return jobs
+
+
+# ============ 生成 H5 岗位推荐页面 ============
+def generate_h5_report(user: dict, jobs: list[dict]) -> str:
+    """生成自包含的 H5 页面，手机浏览器直接打开查看，返回文件路径"""
+    user_id = user.get('id', 'unknown')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def esc(v):
+        return html.escape(str(v)) if v else '—'
+
+    def list_items(val):
+        if isinstance(val, str):
+            items = [x.strip() for x in val.split('\n') if x.strip()]
+        elif isinstance(val, list):
+            items = val
+        else:
+            items = []
+        return ''.join(f'<li>{html.escape(str(x))}</li>' for x in items)
+
+    type_colors = {
+        "国企": "#dc2626",
+        "私企": "#2563eb",
+        "外企": "#16a34a",
+    }
+
+    cards = []
+    for idx, job in enumerate(jobs, 1):
+        etype = job.get('enterprise_type', '—')
+        etype_color = type_colors.get(etype, "#6b7280")
+        cards.append(f"""
+    <div class="card">
+      <div class="card-header">
+        <span class="job-index">{idx}</span>
+        <div class="job-title-wrap">
+          <h2>{esc(job.get('job_title'))}</h2>
+          <span class="tag" style="background:{etype_color}">{esc(etype)}</span>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-row">
+          <div class="info-item"><span class="label">公司</span><span class="value">{esc(job.get('company'))}</span></div>
+          <div class="info-item"><span class="label">薪资</span><span class="value salary">{esc(job.get('salary_range', '面议'))}</span></div>
+        </div>
+        <div class="info-row">
+          <div class="info-item"><span class="label">匹配度</span><span class="value match">{esc(job.get('match_score', 0))}%</span></div>
+          <div class="info-item"><span class="label">地点</span><span class="value">{esc(job.get('work_location'))}</span></div>
+        </div>
+        <div class="match-bar"><div class="match-fill" style="width:{esc(job.get('match_score', 0))}%"></div></div>
+        <div class="section"><h3>📋 岗位职责</h3><ul>{list_items(job.get('responsibilities'))}</ul></div>
+        <div class="section"><h3>✅ 任职要求</h3><ul>{list_items(job.get('requirements'))}</ul></div>
+        <div class="section"><h3>🎁 福利待遇</h3><ul>{list_items(job.get('benefits'))}</ul></div>
+        <div class="section"><h3>📈 职业发展</h3><p>{esc(job.get('development', '暂无信息'))}</p></div>
+      </div>
+    </div>""")
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>智能岗位推荐报告</title>
+  <style>
+    *{{margin:0;padding:0;box-sizing:border-box}}
+    body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#f0f2f5;color:#1f2937;line-height:1.6;max-width:640px;margin:0 auto;padding-bottom:40px}}
+    .header{{background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;padding:32px 20px 24px;text-align:center;position:sticky;top:0;z-index:10;box-shadow:0 2px 12px rgba(37,99,235,.3)}}
+    .header h1{{font-size:22px;margin-bottom:6px}}
+    .header .date{{font-size:12px;opacity:.85}}
+    .user-info{{background:#fff;margin:12px;border-radius:12px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}}
+    .user-info h2{{font-size:15px;color:#2563eb;margin-bottom:12px}}
+    .user-info .grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+    .user-info .item{{font-size:13px}}
+    .user-info .item .k{{color:#6b7280;margin-right:4px}}
+    .user-info .item .v{{color:#1f2937;font-weight:600}}
+    .card{{background:#fff;margin:12px;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06)}}
+    .card-header{{display:flex;align-items:center;gap:12px;padding:16px;background:linear-gradient(90deg,#eff6ff,#f0f9ff)}}
+    .job-index{{width:28px;height:28px;border-radius:50%;background:#2563eb;color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0}}
+    .job-title-wrap{{flex:1;min-width:0}}
+    .job-title-wrap h2{{font-size:16px;color:#1f2937}}
+    .tag{{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;color:#fff;margin-top:2px}}
+    .card-body{{padding:16px}}
+    .info-row{{display:flex;gap:12px;margin-bottom:8px}}
+    .info-item{{flex:1;display:flex;flex-direction:column}}
+    .info-item .label{{font-size:11px;color:#9ca3af}}
+    .info-item .value{{font-size:14px;font-weight:600;color:#1f2937}}
+    .info-item .value.salary{{color:#dc2626}}
+    .info-item .value.match{{color:#16a34a}}
+    .match-bar{{height:6px;background:#e5e7eb;border-radius:3px;margin:8px 0 16px;overflow:hidden}}
+    .match-fill{{height:100%;background:linear-gradient(90deg,#16a34a,#22c55e);border-radius:3px;transition:width .3s}}
+    .section{{margin-top:14px}}
+    .section h3{{font-size:13px;color:#374151;margin-bottom:6px}}
+    .section ul{{padding-left:18px}}
+    .section ul li{{font-size:13px;color:#4b5563;margin-bottom:4px}}
+    .section p{{font-size:13px;color:#4b5563}}
+    .footer{{text-align:center;padding:20px;font-size:11px;color:#9ca3af}}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>📋 智能岗位推荐报告</h1>
+    <div class="date">{datetime.now().strftime("%Y年%m月%d日 %H:%M")} 生成</div>
+  </div>
+  <div class="user-info">
+    <h2>👤 求职者信息</h2>
+    <div class="grid">
+      <div class="item"><span class="k">城市</span><span class="v">{esc(user.get('city'))}</span></div>
+      <div class="item"><span class="k">学历</span><span class="v">{esc(user.get('degree'))}</span></div>
+      <div class="item"><span class="k">工作经验</span><span class="v">{esc(user.get('experience'))}</span></div>
+      <div class="item"><span class="k">求职方向</span><span class="v">{esc(user.get('field'))}</span></div>
+      <div class="item"><span class="k">权威证书</span><span class="v">{esc(user.get('certifications') or '无')}</span></div>
+    </div>
+  </div>
+  {''.join(cards)}
+  <div class="footer">本报告由智能岗位推荐系统自动生成 | Powered by 智谱 GLM-4-Flash</div>
+</body>
+</html>"""
+
+    filename = f"job_h5_user{user_id}_{timestamp}.html"
+    filepath = os.path.join(REPORT_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    print(f"[H5] 已生成: {filepath}")
+    return filepath
 
 
 # ============ 生成 docx 岗位推荐报告 ============
@@ -323,8 +447,8 @@ def generate_docx_report(user: dict, jobs: list[dict]) -> str:
 STORAGE_BUCKET = "reports"  # 需要在 Supabase 创建名为 reports 的公开 bucket
 
 
-def upload_to_storage(filepath: str) -> str | None:
-    """上传 docx 到 Supabase Storage，返回公开下载链接；失败则返回 None"""
+def upload_to_storage(filepath: str, content_type: str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document") -> str | None:
+    """上传文件到 Supabase Storage，返回公开下载链接；失败则返回 None"""
     filename = os.path.basename(filepath)
     try:
         with open(filepath, "rb") as f:
@@ -332,7 +456,7 @@ def upload_to_storage(filepath: str) -> str | None:
         upload_headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "Content-Type": content_type,
         }
         resp = requests.post(
             f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{filename}",
@@ -383,13 +507,13 @@ def push_wechat(user: dict, jobs: list[dict], download_url: str | None = None):
         md_lines.append(f"")
         md_lines.append(f"---")
         md_lines.append(f"")
-    # 下载链接
+    # 查看链接（H5 页面，手机直接打开）
     if download_url:
-        md_lines.append(f"📥 **[点击下载完整岗位推荐报告（docx）]({download_url})**")
+        md_lines.append(f"📱 **[点击查看完整岗位推荐详情]({download_url})**")
         md_lines.append(f"")
-        md_lines.append(f"> 报告包含每个岗位的详细职责、任职要求、福利待遇、职业发展前景")
+        md_lines.append(f"> 手机浏览器直接打开，查看每个岗位的职责、要求、福利等完整信息")
     else:
-        md_lines.append(f"> 完整岗位推荐报告（docx）已生成，请前往 GitHub Actions 下载")
+        md_lines.append(f"> 完整岗位推荐报告已生成，请前往 GitHub Actions 下载")
     content = "\n".join(md_lines)
     try:
         resp = requests.post(
@@ -428,13 +552,19 @@ def main():
             try:
                 jobs = generate_recommendations(u)
                 saved = save_recommendations(u["id"], jobs)
+                # 先生成 H5 页面并上传，获取可直接跳转的链接
+                h5_path = generate_h5_report(u, saved)
+                h5_url = upload_to_storage(h5_path, content_type="text/html; charset=utf-8")
+                # 将每个岗位的详情链接指向 H5 页面
+                if h5_url:
+                    for j in saved:
+                        j["detail_link"] = h5_url
+                # 生成 docx 报告（详情链接已指向 H5 页面）
                 report_path = generate_docx_report(u, saved)
                 generated_reports.append(report_path)
-                # 上传到 Supabase Storage 获取公开下载链接
-                download_url = upload_to_storage(report_path)
-                # 推送微信/邮箱，包含下载链接
-                push_wechat(u, saved, download_url)
-                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位，报告已生成并推送")
+                # 推送微信/邮箱，H5 链接可直接在手机浏览器跳转
+                push_wechat(u, saved, h5_url)
+                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位，H5+docx 报告已生成并推送")
                 success_count += 1
             except Exception as e:
                 print(f"[主流程] 用户 {u.get('id')} 处理失败: {e}")

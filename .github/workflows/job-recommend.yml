@@ -38,5 +38,5 @@ jobs:
         if: always()
         with:
           name: 岗位推荐报告_${{ github.run_id }}
-          path: reports/*.docx
+          path: reports/*
           retention-days: 30
