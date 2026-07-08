@@ -88,6 +88,24 @@ def fetch_users():
     return users
 
 
+# ============ 多平台真实招聘搜索链接 ============
+def build_search_links(keyword: str, city: str, enterprise_type: str = "") -> list[dict]:
+    """为每个岗位生成多个真实招聘平台的搜索链接"""
+    kw = quote(str(keyword))
+    ct = quote(str(city))
+    links = []
+    # 综合招聘平台
+    links.append({"name": "BOSS直聘", "url": f"https://www.zhipin.com/web/geek/job?query={kw}&city={ct}", "icon": "💼"})
+    links.append({"name": "智联招聘", "url": f"https://sou.zhaopin.com/?kw={kw}&jl={ct}", "icon": "🔍"})
+    links.append({"name": "猎聘", "url": f"https://www.liepin.com/zhaopin/?key={kw}", "icon": "🎯"})
+    # 国企专项平台
+    if enterprise_type == "国企":
+        links.append({"name": "国企人才网", "url": f"https://www.guoqi.com/job/search/?keyword={kw}", "icon": "🏛️"})
+        links.append({"name": "中公国企招聘", "url": "https://www.offcn.com/gqzp/", "icon": "📋"})
+        links.append({"name": "国资委央企招聘", "url": "http://www.sasac.gov.cn/n2588035/n2588105/index.html", "icon": "🇨🇳"})
+    return links
+
+
 # ============ 调用智谱 GLM 生成推荐（含详细说明 + 自检）============
 def generate_recommendations(user: dict) -> list[dict]:
     city = user.get('city', '')
@@ -97,20 +115,21 @@ def generate_recommendations(user: dict) -> list[dict]:
     certs = user.get('certifications') or '无'
 
     # ---- 第一轮：生成推荐 ----
-    prompt = f"""你是一名资深猎头，精通中国{city}市的就业市场。请根据以下求职者画像，推荐 3 个最匹配的岗位方向。
+    prompt = f"""你是一名资深猎头，精通中国{city}市的就业市场，尤其熟悉国企招聘。请根据以下求职者画像，推荐 3 个最匹配的岗位方向。
 
 【严格规则 — 必须遵守】
-1. 禁止虚构公司名称！company 字段固定填空字符串 ""
-2. 禁止编造详情链接！detail_link 字段固定填空字符串 ""（系统会自动生成真实招聘平台链接）
-3. 薪资范围必须是{city}市该岗位的【真实市场水平】，参考 BOSS直聘/智联招聘的实际数据
-4. 任职要求必须与求职者的学历（{degree}）和工作经验（{experience}）匹配
-5. 岗位职责必须真实、具体，符合该岗位的实际工作内容，不要泛泛而谈
-6. 福利待遇必须是该类企业的常见真实福利
-7. match_score 要基于求职者条件与岗位要求的实际匹配度计算
-8. enterprise_type 只能是"国企""私企""外企"之一，代表推荐的企业类型方向
+1. 国企岗位占比要求：3 个岗位中至少 2 个必须是国企方向（enterprise_type="国企"），国企方向包括但不限于：国家电网、南方电网、三大运营商（移动/联通/电信）、国有四大行、中石油/中石化、中国建筑、中铁、中交、烟草、水务、燃气、城投、地铁等
+2. 禁止虚构公司名称！company 字段固定填空字符串 ""
+3. 禁止编造详情链接！detail_link 字段固定填空字符串 ""（系统会自动生成多平台真实搜索链接）
+4. 薪资范围必须是{city}市该岗位的【真实市场水平】。国企岗位薪资参考实际国企薪酬体系（含年终奖/公积金等隐性福利）
+5. 任职要求必须与求职者的学历（{degree}）和工作经验（{experience}）匹配。国企岗位如需特定证书优先匹配
+6. 岗位职责必须真实、具体，符合该岗位的实际工作内容
+7. 福利待遇必须是该类企业的常见真实福利（国企要体现编制/六险二金/年终奖等）
+8. match_score 要基于求职者条件与岗位要求的实际匹配度计算
+9. enterprise_type 只能是"国企""私企""外企"之一
 
 返回严格的 JSON 数组，每个元素包含：
-- job_title：岗位名称（真实存在的岗位名称）
+- job_title：岗位名称（真实存在的岗位名称，国企岗位要带单位性质如"国家电网-线路运维工程师"）
 - company：固定填空字符串 ""
 - enterprise_type：推荐的企业类型（国企/私企/外企）
 - match_score：匹配度（0-100 整数）
@@ -121,7 +140,7 @@ def generate_recommendations(user: dict) -> list[dict]:
 - benefits：福利待遇（3-4 条真实福利，换行符分隔）
 - development：职业发展前景（1-2 句）
 - work_location：具体工作地点（{city}市的具体区域）
-- search_keyword：用于在招聘平台搜索的关键词（如"Python开发工程师"）
+- search_keyword：用于在招聘平台搜索的关键词（国企岗位用单位名+岗位名，如"国家电网 运维"）
 
 求职者画像：
 - 城市：{city}
@@ -136,10 +155,11 @@ def generate_recommendations(user: dict) -> list[dict]:
     # ---- 第二轮：AI 自检修正 ----
     jobs = _validate_and_fix(user, jobs)
 
-    # ---- 构造真实招聘平台搜索链接 ----
+    # ---- 构造多平台真实招聘搜索链接 ----
     for j in jobs:
         keyword = j.pop('search_keyword', j['job_title'])
-        j['detail_link'] = f"https://www.zhipin.com/web/geek/job?query={quote(str(keyword))}&city={quote(str(city))}"
+        j['search_links'] = build_search_links(keyword, city, j.get('enterprise_type', ''))
+        j['detail_link'] = j['search_links'][0]['url']  # 默认指向第一个平台
         if not j.get('company'):
             j['company'] = f'点击查看{city}在招公司'
 
@@ -164,14 +184,16 @@ def _validate_and_fix(user: dict, jobs: list[dict]) -> list[dict]:
     check_prompt = f"""你是猎头质量审核员。请逐一审查以下岗位推荐，检查并修正问题：
 
 【检查项】
-1. 薪资范围是否合理：必须符合{user.get('city')}市该岗位的真实市场水平。偏高或偏低都要修正。
-2. 任职要求是否匹配：求职者学历是"{user.get('degree')}"，经验是"{user.get('experience')}"。如果要求过高或过低，修正为合理水平。
-3. 岗位职责是否真实具体：不能是泛泛而谈的套话，必须符合该岗位的实际工作。
-4. 福利待遇是否真实：必须是该类企业常见的真实福利。
-5. match_score 是否合理：基于求职者条件与岗位要求的实际匹配度。
-6. work_location 必须是{user.get('city')}市的具体区域。
-7. company 字段必须为空字符串 ""。
-8. detail_link 字段必须为空字符串 ""。
+1. 国企岗位比例：3 个岗位中至少 2 个必须是 enterprise_type="国企"。如果不足，将最匹配的私企/外企岗位改为国企方向（调整岗位内容和薪资为国企水平）。
+2. 薪资范围是否合理：必须符合{user.get('city')}市该岗位的真实市场水平。偏高或偏低都要修正。国企薪资含年终奖/公积金等。
+3. 任职要求是否匹配：求职者学历是"{user.get('degree')}"，经验是"{user.get('experience')}"。如果要求过高或过低，修正为合理水平。
+4. 岗位职责是否真实具体：不能是泛泛而谈的套话，必须符合该岗位的实际工作。
+5. 福利待遇是否真实：必须是该类企业常见的真实福利。国企要体现编制/六险二金/年终奖等。
+6. match_score 是否合理：基于求职者条件与岗位要求的实际匹配度。
+7. work_location 必须是{user.get('city')}市的具体区域。
+8. company 字段必须为空字符串 ""。
+9. detail_link 字段必须为空字符串 ""。
+10. search_keyword 必须保留，国企岗位用单位名+岗位名（如"国家电网 运维"）。
 
 求职者画像：
 - 城市：{user.get('city')}
@@ -269,7 +291,12 @@ def generate_h5_report(user: dict, jobs: list[dict]) -> str:
         <div class="section"><h3>✅ 任职要求</h3><ul>{list_items(job.get('requirements'))}</ul></div>
         <div class="section"><h3>🎁 福利待遇</h3><ul>{list_items(job.get('benefits'))}</ul></div>
         <div class="section"><h3>📈 职业发展</h3><p>{esc(job.get('development', '暂无信息'))}</p></div>
-        <a class="view-btn" href="{esc(job.get('detail_link', '#'))}" target="_blank">🔍 查看{esc(user.get('city', ''))}真实在招岗位</a>
+        <div class="platform-links">
+          <div class="platform-title">🔗 点击查看真实在招岗位</div>
+          <div class="platform-btns">
+            {''.join(f'<a class="platform-btn" href="{esc(sl["url"])}" target="_blank">{sl["icon"]} {esc(sl["name"])}</a>' for sl in job.get('search_links', []))}
+          </div>
+        </div>
       </div>
     </div>""")
 
@@ -311,7 +338,14 @@ def generate_h5_report(user: dict, jobs: list[dict]) -> str:
     .section ul{{padding-left:18px}}
     .section ul li{{font-size:13px;color:#4b5563;margin-bottom:4px}}
     .section p{{font-size:13px;color:#4b5563}}
-    .view-btn{{display:block;text-align:center;padding:12px;margin-top:16px;background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;border-radius:8px;font-size:14px;font-weight:600;text-decoration:none}}
+    .platform-links{{margin-top:16px;border-top:1px dashed #e5e7eb;padding-top:14px}}
+    .platform-title{{font-size:13px;color:#374151;margin-bottom:10px;font-weight:600}}
+    .platform-btns{{display:flex;flex-wrap:wrap;gap:8px}}
+    .platform-btn{{display:inline-block;padding:8px 14px;border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;color:#fff;background:linear-gradient(135deg,#2563eb,#7c3aed)}}
+    .platform-btn:nth-child(4n+1){{background:linear-gradient(135deg,#2563eb,#3b82f6)}}
+    .platform-btn:nth-child(4n+2){{background:linear-gradient(135deg,#16a34a,#22c55e)}}
+    .platform-btn:nth-child(4n+3){{background:linear-gradient(135deg,#ea580c,#f97316)}}
+    .platform-btn:nth-child(4n){{background:linear-gradient(135deg,#dc2626,#ef4444)}}
     .footer{{text-align:center;padding:20px;font-size:11px;color:#9ca3af}}
   </style>
 </head>
