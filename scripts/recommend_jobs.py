@@ -89,31 +89,65 @@ def fetch_users():
 
 
 # ============ 多平台真实招聘搜索链接 ============
-def build_search_links(keyword: str, city: str, enterprise_type: str = "") -> list[dict]:
+# 国企官方招聘平台映射（根据岗位名称匹配）
+ENTERPRISE_OFFICIAL_LINKS = {
+    "国家电网": {"name": "国家电网招聘", "url": "https://zhaopin.sgcc.com.cn/", "icon": "⚡"},
+    "南方电网": {"name": "南方电网招聘", "url": "http://www.csg.cn/", "icon": "⚡"},
+    "中国移动": {"name": "中国移动招聘", "url": "https://job.10086.cn/", "icon": "📱"},
+    "中国联通": {"name": "中国联通招聘", "url": "https://hr.chinaunicom.com/", "icon": "📱"},
+    "中国电信": {"name": "中国电信招聘", "url": "https://www.chinatelecom.com.cn/", "icon": "📱"},
+    "工商银行": {"name": "工商银行招聘", "url": "https://job.icbc.com.cn/", "icon": "🏦"},
+    "建设银行": {"name": "建设银行招聘", "url": "https://job.ccb.com/", "icon": "🏦"},
+    "农业银行": {"name": "农业银行招聘", "url": "https://job.abchina.com/", "icon": "🏦"},
+    "中国银行": {"name": "中国银行招聘", "url": "https://campus.chinahr.com/pages/boc/", "icon": "🏦"},
+    "交通银行": {"name": "交通银行招聘", "url": "https://job.bankcomm.com/", "icon": "🏦"},
+    "中石油": {"name": "中石油招聘", "url": "https://zhaopin.cnpc.com.cn/", "icon": "🛢️"},
+    "中石化": {"name": "中石化招聘", "url": "http://job.sinopec.com/", "icon": "🛢️"},
+    "中国建筑": {"name": "中国建筑招聘", "url": "https://jobs.cscec.com/", "icon": "🏗️"},
+    "中铁": {"name": "中国铁路人才招聘", "url": "https://job.crec.cn/", "icon": "🚄"},
+    "中交": {"name": "中交集团招聘", "url": "https://job.ccccltd.cn/", "icon": "🚧"},
+    "烟草": {"name": "中国烟草招聘", "url": "http://www.tobacco.gov.cn/", "icon": "🚬"},
+    "水务": {"name": "水务集团招聘", "url": "https://www.waterchina.com/", "icon": "💧"},
+    "城投": {"name": "城投集团招聘", "url": "http://www.citiccapital.com/", "icon": "🏢"},
+    "地铁": {"name": "地铁集团招聘", "url": "https://www.chinametro.net/", "icon": "🚇"},
+}
+
+
+def get_enterprise_official_link(job_title: str) -> dict | None:
+    """根据岗位名称中的国企单位名，返回对应的官方招聘平台链接"""
+    for key, info in ENTERPRISE_OFFICIAL_LINKS.items():
+        if key in str(job_title):
+            return info
+    return None
+
+
+def build_search_links(keyword: str, city: str, enterprise_type: str = "", job_title: str = "") -> list[dict]:
     """为每个岗位生成多个真实招聘平台的搜索链接"""
     # 简化关键词：去掉国企前缀，只保留岗位关键词
-    # 如"国家电网-配电运维工程师" → "配电运维工程师"
     simple_kw = keyword
     if "-" in simple_kw:
         simple_kw = simple_kw.split("-", 1)[1].strip()
-    # 进一步简化：去掉"工程师""经理"等后缀，保留核心关键词
     core_kw = simple_kw
     for suffix in ["工程师", "经理", "主管", "专员", "技术员", "操作员"]:
         if core_kw.endswith(suffix) and len(core_kw) > len(suffix) + 2:
             core_kw = core_kw[:-len(suffix)]
             break
-    # 最终搜索关键词：用核心词，如果没有就用简化词
     search_kw = quote(str(core_kw or simple_kw or keyword))
     links = []
-    # 综合招聘平台（不带城市参数，各平台编码不同无法统一，用户手动选择城市）
+    # 综合招聘平台
     links.append({"name": "BOSS直聘", "url": f"https://www.zhipin.com/web/geek/job?query={search_kw}", "icon": "💼"})
     links.append({"name": "智联招聘", "url": f"https://sou.zhaopin.com/?kw={search_kw}", "icon": "🔍"})
     links.append({"name": "猎聘", "url": f"https://www.liepin.com/zhaopin/?key={search_kw}", "icon": "🎯"})
-    # 国企专项平台
+    # 国企官方权威平台（优先推荐）
     if enterprise_type == "国企":
-        links.append({"name": "国企人才网", "url": f"https://www.guoqi.com/job/search/?keyword={search_kw}", "icon": "🏛️"})
-        links.append({"name": "中公国企招聘", "url": "https://www.offcn.com/gqzp/", "icon": "📋"})
+        links.append({"name": "国聘网", "url": f"https://www.iguopin.com/job/list?keywords={search_kw}", "icon": "🏛️"})
         links.append({"name": "国资委央企招聘", "url": "http://www.sasac.gov.cn/n2588035/n2588105/index.html", "icon": "🇨🇳"})
+        links.append({"name": "人社部就业", "url": "http://job.mohrss.gov.cn/", "icon": "📋"})
+        links.append({"name": "新职业网", "url": f"https://www.ncss.cn/student/jobsearch/fairs.html?keywords={search_kw}", "icon": "🎓"})
+        # 企业自有官方招聘平台
+        official = get_enterprise_official_link(job_title)
+        if official:
+            links.append(official)
     return links
 
 
@@ -154,6 +188,8 @@ C. 国企福利包含：编制/六险二金/年终奖/带薪年假/体检等
 D. 国企任职要求基于真实国企招聘公告，体现学历层次/专业对口/年龄限制等
 E. 国企岗位职责符合该国企主营业务
 F. search_keyword 用"单位名+岗位关键词"格式
+G. 【信息来源优先级】国企岗位信息必须优先从以下官方权威来源获取：①国聘网(iguopin.com) ②国资委(sasac.gov.cn) ③人社部就业网(job.mohrss.gov.cn) ④新职业网(ncss.cn)。如官方来源找不到匹配岗位，再从企业自有官方招聘平台获取（国家电网人力资源招聘平台、中国铁路人才招聘网、中国烟草总公司人才招聘平台、国有六大行/三大运营商/建筑类央企各自的招聘官网）。最后才考虑BOSS直聘等商业平台。
+H. 从官方来源获取的信息仍需经过自检验证真实性，确保薪资/要求/职责与官方招聘公告一致
 
 返回严格的 JSON 数组，每个元素包含：
 - job_title：岗位名称（国企带单位简称前缀）
@@ -188,7 +224,7 @@ F. search_keyword 用"单位名+岗位关键词"格式
     # ---- 构造多平台真实招聘搜索链接 ----
     for j in jobs:
         keyword = j.pop('search_keyword', j['job_title'])
-        j['search_links'] = build_search_links(keyword, city, j.get('enterprise_type', ''))
+        j['search_links'] = build_search_links(keyword, city, j.get('enterprise_type', ''), j.get('job_title', ''))
         j['detail_link'] = j['search_links'][0]['url']  # 默认指向第一个平台
         if not j.get('company'):
             j['company'] = f'点击查看{city}在招公司'
@@ -279,6 +315,7 @@ def _validate_guoqi_jobs(user: dict, jobs: list[dict]) -> list[dict]:
 7. 职责匹配性：岗位职责符合该国企主营业务。
 8. match_score：基于求职者条件超出真实岗位要求的程度。
 9. search_keyword：用"单位名+岗位关键词"格式。
+10. 【来源权威性】岗位信息是否基于官方权威来源？优先级：①国聘网(iguopin.com) ②国资委(sasac.gov.cn) ③人社部(job.mohrss.gov.cn) ④新职业网(ncss.cn) ⑤企业自有官方招聘平台。如果岗位信息明显不符合官方招聘公告的实际情况，请基于官方来源修正。
 
 待审查的国企岗位（JSON）：
 {json.dumps(guoqi_jobs, ensure_ascii=False, indent=2)}
