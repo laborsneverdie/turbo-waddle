@@ -597,14 +597,13 @@ def generate_docx_report(user: dict, jobs: list[dict]) -> str:
         for run in dev_para.runs:
             run.font.size = Pt(10)
 
-        # 详情链接
-        link_para = doc.add_paragraph()
-        link_label = link_para.add_run('详情链接：')
-        link_label.bold = True
-        link_label.font.size = Pt(10)
-        link_val = link_para.add_run(job.get('detail_link', ''))
-        link_val.font.size = Pt(10)
-        link_val.font.color.rgb = RGBColor(0x25, 0x63, 0xeb)
+        # 各平台搜索链接
+        doc.add_heading('查看真实在招岗位', level=3)
+        for sl in job.get('search_links', []):
+            p = doc.add_paragraph()
+            run = p.add_run(f"{sl['icon']} {sl['name']}：{sl['url']}")
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor(0x25, 0x63, 0xeb)
 
         # 分隔线（除最后一个外）
         if idx < len(jobs):
@@ -693,6 +692,12 @@ def push_wechat(user: dict, jobs: list[dict], download_url: str | None = None):
         if j.get('work_location'):
             md_lines.append(f"| 地点 | {j['work_location']} |")
         md_lines.append(f"")
+        # 各平台搜索链接
+        if j.get('search_links'):
+            md_lines.append(f"**🔗 查看真实在招岗位：**")
+            for sl in j['search_links']:
+                md_lines.append(f"- [{sl['icon']} {sl['name']}]({sl['url']})")
+            md_lines.append(f"")
         md_lines.append(f"---")
         md_lines.append(f"")
     # 查看链接（H5 页面，手机直接打开）
