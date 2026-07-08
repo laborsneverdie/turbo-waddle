@@ -91,16 +91,27 @@ def fetch_users():
 # ============ 多平台真实招聘搜索链接 ============
 def build_search_links(keyword: str, city: str, enterprise_type: str = "") -> list[dict]:
     """为每个岗位生成多个真实招聘平台的搜索链接"""
-    kw = quote(str(keyword))
-    ct = quote(str(city))
+    # 简化关键词：去掉国企前缀，只保留岗位关键词
+    # 如"国家电网-配电运维工程师" → "配电运维工程师"
+    simple_kw = keyword
+    if "-" in simple_kw:
+        simple_kw = simple_kw.split("-", 1)[1].strip()
+    # 进一步简化：去掉"工程师""经理"等后缀，保留核心关键词
+    core_kw = simple_kw
+    for suffix in ["工程师", "经理", "主管", "专员", "技术员", "操作员"]:
+        if core_kw.endswith(suffix) and len(core_kw) > len(suffix) + 2:
+            core_kw = core_kw[:-len(suffix)]
+            break
+    # 最终搜索关键词：用核心词，如果没有就用简化词
+    search_kw = quote(str(core_kw or simple_kw or keyword))
     links = []
-    # 综合招聘平台
-    links.append({"name": "BOSS直聘", "url": f"https://www.zhipin.com/web/geek/job?query={kw}&city={ct}", "icon": "💼"})
-    links.append({"name": "智联招聘", "url": f"https://sou.zhaopin.com/?kw={kw}&jl={ct}", "icon": "🔍"})
-    links.append({"name": "猎聘", "url": f"https://www.liepin.com/zhaopin/?key={kw}", "icon": "🎯"})
+    # 综合招聘平台（不带城市参数，各平台编码不同无法统一，用户手动选择城市）
+    links.append({"name": "BOSS直聘", "url": f"https://www.zhipin.com/web/geek/job?query={search_kw}", "icon": "💼"})
+    links.append({"name": "智联招聘", "url": f"https://sou.zhaopin.com/?kw={search_kw}", "icon": "🔍"})
+    links.append({"name": "猎聘", "url": f"https://www.liepin.com/zhaopin/?key={search_kw}", "icon": "🎯"})
     # 国企专项平台
     if enterprise_type == "国企":
-        links.append({"name": "国企人才网", "url": f"https://www.guoqi.com/job/search/?keyword={kw}", "icon": "🏛️"})
+        links.append({"name": "国企人才网", "url": f"https://www.guoqi.com/job/search/?keyword={search_kw}", "icon": "🏛️"})
         links.append({"name": "中公国企招聘", "url": "https://www.offcn.com/gqzp/", "icon": "📋"})
         links.append({"name": "国资委央企招聘", "url": "http://www.sasac.gov.cn/n2588035/n2588105/index.html", "icon": "🇨🇳"})
     return links
@@ -345,6 +356,7 @@ def generate_h5_report(user: dict, jobs: list[dict]) -> str:
         <div class="section"><h3>📈 职业发展</h3><p>{esc(job.get('development', '暂无信息'))}</p></div>
         <div class="platform-links">
           <div class="platform-title">🔗 点击查看真实在招岗位</div>
+          <div class="platform-hint">💡 提示：进入招聘平台后，请手动选择城市「{esc(user.get('city', ''))}」以获取当地岗位</div>
           <div class="platform-btns">
             {''.join(f'<a class="platform-btn" href="{esc(sl["url"])}" target="_blank">{sl["icon"]} {esc(sl["name"])}</a>' for sl in job.get('search_links', []))}
           </div>
@@ -391,7 +403,8 @@ def generate_h5_report(user: dict, jobs: list[dict]) -> str:
     .section ul li{{font-size:13px;color:#4b5563;margin-bottom:4px}}
     .section p{{font-size:13px;color:#4b5563}}
     .platform-links{{margin-top:16px;border-top:1px dashed #e5e7eb;padding-top:14px}}
-    .platform-title{{font-size:13px;color:#374151;margin-bottom:10px;font-weight:600}}
+    .platform-title{{font-size:13px;color:#374151;margin-bottom:8px;font-weight:600}}
+    .platform-hint{{font-size:11px;color:#9ca3af;margin-bottom:10px;background:#f3f4f6;padding:6px 10px;border-radius:6px}}
     .platform-btns{{display:flex;flex-wrap:wrap;gap:8px}}
     .platform-btn{{display:inline-block;padding:8px 14px;border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;color:#fff;background:linear-gradient(135deg,#2563eb,#7c3aed)}}
     .platform-btn:nth-child(4n+1){{background:linear-gradient(135deg,#2563eb,#3b82f6)}}
