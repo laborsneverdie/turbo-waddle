@@ -128,6 +128,14 @@ def generate_recommendations(user: dict) -> list[dict]:
 8. match_score 要基于求职者条件与岗位要求的实际匹配度计算
 9. enterprise_type 只能是"国企""私企""外企"之一
 
+【国企岗位专项要求 — 必须遵守】
+A. job_title 必须包含真实国企单位名称，格式为"单位简称-岗位名"，如"国家电网-配电运维工程师""中国移动-网络优化工程师""工商银行-客户经理"
+B. 国企薪资要体现真实薪酬结构：基本工资+岗位津贴+绩效奖金+年终奖+公积金，salary_range 填月均到手范围（如"8k-12k/月，年终奖3-5万"）
+C. 国企福利必须包含：正式编制/六险二金（养老/医疗/失业/工伤/生育+补充医疗，公积金+企业年金）/年终奖/带薪年假/定期体检/餐补交通补等真实福利
+D. 国企任职要求要体现国企特点：学历层次要求、专业对口、年龄限制（如35岁以下）、政治面貌（党员优先）、相关证书等
+E. 国企岗位职责要符合该国企的主营业务，如国家电网岗位围绕电力输送/运维/营销，中国移动岗位围绕通信网络/客服/营销
+F. search_keyword 用"单位名+岗位关键词"格式，如"国家电网 配电运维""中国移动 网络优化"
+
 返回严格的 JSON 数组，每个元素包含：
 - job_title：岗位名称（真实存在的岗位名称，国企岗位要带单位性质如"国家电网-线路运维工程师"）
 - company：固定填空字符串 ""
@@ -152,8 +160,11 @@ def generate_recommendations(user: dict) -> list[dict]:
 只返回 JSON 数组，不要任何额外文字。"""
     jobs = _call_ai(prompt)
 
-    # ---- 第二轮：AI 自检修正 ----
+    # ---- 第二轮：通用自检修正 ----
     jobs = _validate_and_fix(user, jobs)
+
+    # ---- 第三轮：国企专项自检 ----
+    jobs = _validate_guoqi_jobs(user, jobs)
 
     # ---- 构造多平台真实招聘搜索链接 ----
     for j in jobs:
@@ -209,10 +220,51 @@ def _validate_and_fix(user: dict, jobs: list[dict]) -> list[dict]:
 只返回 JSON 数组，不要任何额外文字。"""
     try:
         fixed = _call_ai(check_prompt)
-        print(f"[自检] AI 自检完成，已审查 {len(fixed)} 个岗位")
+        print(f"[自检] 通用自检完成，已审查 {len(fixed)} 个岗位")
         return fixed
     except Exception as e:
-        print(f"[自检] 自检失败，使用原始结果: {e}")
+        print(f"[自检] 通用自检失败，使用原始结果: {e}")
+        return jobs
+
+
+def _validate_guoqi_jobs(user: dict, jobs: list[dict]) -> list[dict]:
+    """国企专项自检：专门审查国企岗位的真实性和准确性"""
+    guoqi_jobs = [j for j in jobs if j.get('enterprise_type') == '国企']
+    if not guoqi_jobs:
+        print("[国企自检] 无国企岗位，跳过")
+        return jobs
+
+    check_prompt = f"""你是国企招聘专家，熟悉各大国企的真实招聘情况。请逐一审查以下国企岗位推荐，严格检查并修正：
+
+【国企专项检查项】
+1. 单位真实性：job_title 必须包含真实存在的国企单位名（如国家电网/南方电网/中国移动/中国联通/中国电信/工商银行/建设银行/中石油/中石化/中国建筑/中铁/中交/中国烟草/各地水务集团/城投公司/地铁公司等）。如果单位名不真实或不存在，替换为同行业真实国企。
+2. 岗位真实性：岗位必须是该国企真实招聘的岗位类型。如国家电网招聘配电运维/变电运行/电力营销，中国移动招聘网络优化/政企客户经理，银行招聘柜员/客户经理等。
+3. 薪资合理性：必须符合该国企在{user.get('city')}市的真实薪酬水平。国企薪资含基本工资+绩效+年终奖+公积金，不能虚高。参考：地市级国企基层岗到手月薪通常6k-15k，年终奖2-8万。
+4. 福利完整性：必须包含"正式编制"或"合同制（同工同酬）"，以及"六险二金"（养老/医疗/失业/工伤/生育+补充医疗，公积金+企业年金）、年终奖、带薪年假等真实国企福利。缺失的要补充。
+5. 任职要求合理性：要体现国企招聘特点——学历层次（本科/硕士）、专业对口、年龄限制（通常35岁以下）、政治面貌（党员优先）等。要求过高或过低都要修正。
+6. 职责匹配性：岗位职责必须符合该国企的主营业务。如国家电网岗位围绕电力输配/运维/营销，不能出现无关职责。
+7. 求职者匹配：求职者学历"{user.get('degree')}"，经验"{user.get('experience')}"，方向"{user.get('field')}"，证书"{user.get('certifications') or '无'}"。国企岗位必须与求职者条件匹配，不匹配的调整岗位或要求。
+8. search_keyword：必须用"单位名+岗位关键词"格式，如"国家电网 配电运维"。
+
+待审查的国企岗位（JSON）：
+{json.dumps(guoqi_jobs, ensure_ascii=False, indent=2)}
+
+请修正所有问题，返回修正后的完整 JSON 数组（保持原字段结构，包含 search_keyword）。
+只返回 JSON 数组，不要任何额外文字。"""
+    try:
+        fixed_guoqi = _call_ai(check_prompt)
+        print(f"[国企自检] 国企专项自检完成，已审查 {len(fixed_guoqi)} 个国企岗位")
+        # 用修正后的国企岗位替换原列表中的国企岗位
+        fixed_map = {i: fg for i, fg in enumerate(fixed_guoqi)}
+        guoqi_idx = 0
+        for j in jobs:
+            if j.get('enterprise_type') == '国企':
+                if guoqi_idx in fixed_map:
+                    jobs[jobs.index(j)] = fixed_map[guoqi_idx]
+                    guoqi_idx += 1
+        return jobs
+    except Exception as e:
+        print(f"[国企自检] 国企专项自检失败，使用通用自检结果: {e}")
         return jobs
 
 
