@@ -14,9 +14,11 @@ import os
 import sys
 import json
 import html
+import smtplib
 import traceback
 from urllib.parse import quote
 from datetime import datetime
+from email.mime.text import MIMEText
 import requests
 from openai import OpenAI
 from docx import Document
@@ -30,6 +32,10 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")  # service_role key（绕过 RLS）
 ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_APL_KEY")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
+SMTP_HOST = os.environ.get("SMTP_HOST")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_USER = os.environ.get("SMTP_USER")
+SMTP_PASS = os.environ.get("SMTP_PASS")
 
 # 输出目录（GitHub Actions 中为仓库根目录）
 OUTPUT_DIR = os.environ.get("GITHUB_WORKSPACE", os.path.dirname(os.path.abspath(__file__)) + "/..")
@@ -43,6 +49,7 @@ print(f"  SUPABASE_URL 已设置: {bool(SUPABASE_URL)}")
 print(f"  SUPABASE_KEY 已设置: {bool(SUPABASE_KEY)}")
 print(f"  ZHIPU_API_KEY 已设置: {bool(ZHIPU_API_KEY)}")
 print(f"  PUSHPLUS_TOKEN 已设置: {bool(PUSHPLUS_TOKEN)}")
+print(f"  SMTP 邮件推送: {'已配置' if all([SMTP_HOST, SMTP_USER, SMTP_PASS]) else '未配置'}")
 print(f"  报告输出目录: {REPORT_DIR}")
 print("=" * 50)
 
@@ -700,6 +707,75 @@ def upload_to_storage(filepath: str, content_type: str = "application/vnd.openxm
         return None
 
 
+# ============ 邮件推送 ============
+def send_email(user: dict, h5_url: str | None, jobs: list[dict]):
+    """通过 SMTP 发送邮件，包含 H5 链接和岗位摘要"""
+    user_email = user.get('email')
+    if not user_email:
+        print("[邮件] 用户未提供邮箱，跳过")
+        return
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASS]):
+        print("[邮件] SMTP 未配置，跳过邮件推送")
+        return
+
+    city = user.get('city', '—')
+    field = user.get('field', '求职方向')
+    subject = f"【岗位推荐】{field} - {city}（{datetime.now().strftime('%m月%d日 %H:%M')}）"
+
+    # 岗位摘要
+    job_lines = []
+    for i, j in enumerate(jobs, 1):
+        job_lines.append(
+            f"  {i}. {j.get('job_title', '—')}"
+            f" | 匹配度 {j.get('match_score', 0)}%"
+            f" | 薪资 {j.get('salary_range', '面议')}"
+            f" | {j.get('enterprise_type', '—')}"
+        )
+    jobs_summary = "\n".join(job_lines)
+
+    body = f"""您好！
+
+您的智能岗位推荐报告已生成。
+
+══════════════════════════════
+求职者：{city} | {field}
+══════════════════════════════
+
+本次推荐 {len(jobs)} 个岗位：
+{jobs_summary}
+
+──────────────────────────────
+📱 点击查看完整岗位推荐详情（H5页面）：
+{h5_url or '（链接生成失败，请稍后在GitHub Actions中查看）'}
+──────────────────────────────
+
+H5页面中包含：
+  - 每个岗位的详细职责、任职要求、福利待遇
+  - 各官方招聘平台的真实在招岗位搜索链接
+    （国聘网/国资委/人社部/新职业网/企业官网）
+
+祝您求职顺利！
+
+---
+智能岗位推荐系统
+生成时间：{datetime.now().strftime("%Y年%m月%d日 %H:%M")}
+Powered by 智谱 GLM-4-Flash
+"""
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = user_email
+
+    try:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, [user_email], msg.as_string())
+        print(f"[邮件] 已发送至 {user_email}")
+    except Exception as e:
+        print(f"[邮件] 发送失败: {e}")
+
+
 # ============ PushPlus 微信推送 ============
 def push_wechat(user: dict, jobs: list[dict], download_url: str | None = None):
     if not PUSHPLUS_TOKEN:
@@ -794,7 +870,9 @@ def main():
                 generated_reports.append(report_path)
                 # 推送微信/邮箱，H5 链接可直接在手机浏览器跳转
                 push_wechat(u, saved, h5_url)
-                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位，H5+docx 报告已生成并推送")
+                # 邮件推送 H5 链接至用户邮箱
+                send_email(u, h5_url, saved)
+                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位，H5+docx+邮件已推送")
                 success_count += 1
             except Exception as e:
                 print(f"[主流程] 用户 {u.get('id')} 处理失败: {e}")
