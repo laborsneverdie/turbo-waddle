@@ -241,6 +241,55 @@ def crawl_iguopin(keyword: str, city: str) -> list[dict]:
         return []
 
 
+def crawl_enterprise_sites(keyword: str, city: str) -> list[dict]:
+    """尝试爬取中石油/联通/铁路等国企官网招聘信息（可能因反爬失败）"""
+    jobs = []
+    # 各国企官网的招聘页面 URL
+    sites = [
+        ("中石油", "https://zhaopin.cnpc.com.cn/api/recruit/position/list"),
+        ("中国联通", "https://hr.chinaunicom.com/api/recruitment/positions"),
+        ("中国铁路", "https://rczp.china-railway.com.cn/api/job/list"),
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.google.com/",
+    }
+    for name, api_url in sites:
+        try:
+            print(f"[爬取] 尝试爬取{name}招聘API...")
+            params = {"keyword": keyword, "page": 1, "page_size": 10}
+            resp = requests.get(api_url, params=params, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data", {}).get("list", data.get("data", {}).get("records", []))
+                for item in items[:5]:
+                    jobs.append({
+                        "job_title": item.get("jobName", item.get("position_name", "")),
+                        "company": f"{name}（真实数据）",
+                        "enterprise_type": "国企",
+                        "match_score": 0,
+                        "detail_link": item.get("url", ""),
+                        "salary_range": item.get("salary", "面议"),
+                        "responsibilities": item.get("description", ""),
+                        "requirements": "",
+                        "benefits": "",
+                        "development": "",
+                        "work_location": city,
+                        "source": f"{name}官网（真实数据）",
+                    })
+                print(f"[爬取] {name}爬取成功，获取 {len(items[:5])} 个岗位")
+            else:
+                print(f"[爬取] {name}返回 HTTP {resp.status_code}，跳过")
+        except Exception as e:
+            print(f"[爬取] {name}爬取失败: {e}")
+    if jobs:
+        print(f"[爬取] 国企官网共获取 {len(jobs)} 个岗位")
+    else:
+        print("[爬取] 国企官网均无法爬取（反爬机制），将回退AI生成")
+    return jobs
+
+
 # ============ 调用智谱 GLM 生成推荐（含详细说明 + 自检）============
 def generate_recommendations(user: dict) -> list[dict]:
     city = user.get('city', '')
@@ -251,6 +300,11 @@ def generate_recommendations(user: dict) -> list[dict]:
 
     # ---- 第零步：尝试爬取国聘网真实岗位数据 ----
     real_jobs = crawl_iguopin(field, city)
+    # 如果国聘网数据不足，尝试其他国企官网
+    if len(real_jobs) < 3:
+        print("[爬取] 国聘网数据不足，尝试其他国企官网...")
+        extra_jobs = crawl_enterprise_sites(field, city)
+        real_jobs.extend(extra_jobs)
     if len(real_jobs) >= 3:
         # 爬取成功，用真实数据 + AI 分析匹配度
         print(f"[推荐] 使用国聘网真实数据，共 {len(real_jobs)} 个岗位，AI 分析匹配度")
