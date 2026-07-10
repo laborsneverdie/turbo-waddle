@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { queryOne } from "@/lib/db";
+import { supabase } from "@/lib/db";
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,15 +13,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const data = await queryOne<{ id: number }>(
-      `INSERT INTO public.user_profiles (city, degree, experience, field, certifications, email)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id`,
-      [city, degree, experience, field, certifications || null, email || null]
-    );
+    const { data, error } = await supabase
+      .from("user_profiles")
+      .insert({
+        city,
+        degree,
+        experience,
+        field,
+        certifications: certifications || null,
+        email: email || null,
+      })
+      .select("id")
+      .single();
 
-    if (!data) {
-      throw new Error("插入用户资料失败");
+    if (error || !data) {
+      throw new Error(error?.message || "插入用户资料失败");
     }
 
     // 提交成功后，异步触发 GitHub Actions（10分钟内完成首次推荐）

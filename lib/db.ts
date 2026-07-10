@@ -1,21 +1,6 @@
-import { Pool } from "pg";
+import { createClient } from "@supabase/supabase-js";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || "";
 
-export async function query<T = any>(sql: string, params?: any[]): Promise<T[]> {
-  const client = await pool.connect();
-  try {
-    const result = await client.query(sql, params);
-    return result.rows as T[];
-  } finally {
-    client.release();
-  }
-}
-
-export async function queryOne<T = any>(sql: string, params?: any[]): Promise<T | null> {
-  const rows = await query<T>(sql, params);
-  return rows[0] || null;
-}
+export const supabase = createClient(supabaseUrl, supabaseKey);

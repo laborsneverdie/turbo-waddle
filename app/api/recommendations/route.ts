@@ -1,16 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { query } from "@/lib/db";
-
-interface JobRecommendation {
-  id: number;
-  job_title: string;
-  company: string;
-  enterprise_type: string;
-  match_score: number;
-  detail_link: string;
-  user_id: number;
-  created_at: string;
-}
+import { supabase } from "@/lib/db";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -23,18 +12,18 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  try {
-    const data = await query<JobRecommendation>(
-      `SELECT * FROM public.job_recommendations
-       WHERE user_id = $1
-       ORDER BY created_at DESC`,
-      [userId]
-    );
+  const { data, error } = await supabase
+    .from("job_recommendations")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
 
-    return NextResponse.json({ recommendations: data });
-  } catch (err: unknown) {
-    const message =
-      err instanceof Error ? err.message : "服务器内部错误";
-    return NextResponse.json({ error: message }, { status: 500 });
+  if (error) {
+    return NextResponse.json(
+      { error: error.message },
+      { status: 500 }
+    );
   }
+
+  return NextResponse.json({ recommendations: data || [] });
 }
