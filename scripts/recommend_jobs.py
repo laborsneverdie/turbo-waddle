@@ -14,12 +14,16 @@ import os
 import sys
 import json
 import html
+import re
+import time
+import random
 import smtplib
 import traceback
 from urllib.parse import quote
 from datetime import datetime
 from email.mime.text import MIMEText
 import requests
+from bs4 import BeautifulSoup
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -146,6 +150,630 @@ def build_search_links(keyword: str, city: str, enterprise_type: str = "", job_t
     return links
 
 
+# ============ 爬虫辅助函数 ============
+COMMON_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+REQUEST_TIMEOUT = 20  # 每个网站爬取超时（秒）
+
+# 学历等级映射
+_EDU_LEVEL = {
+    "不限": 0, "大专": 1, "专科": 1, "本科": 2, "学士": 2,
+    "硕士": 3, "研究生": 3, "博士": 4, "MBA": 3,
+}
+# 经验等级映射
+_EXP_LEVEL = {
+    "不限": 0, "无经验": 0, "应届": 1, "1年以下": 1, "1年": 1,
+    "1-3年": 2, "3-5年": 3, "5-10年": 4, "10年以上": 5,
+}
+
+
+def _safe_request(url, method="GET", headers=None, json_body=None, timeout=REQUEST_TIMEOUT):
+    """安全的 HTTP 请求封装"""
+    default_headers = {
+        "User-Agent": COMMON_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+    if headers:
+        default_headers.update(headers)
+    try:
+        if method.upper() == "POST":
+            resp = requests.post(url, headers=default_headers, json=json_body, timeout=timeout)
+        else:
+            resp = requests.get(url, headers=default_headers, timeout=timeout)
+        resp.raise_for_status()
+        return resp
+    except requests.exceptions.Timeout:
+        print(f"  [WARNING] 请求超时: {url}")
+        return None
+    except Exception as e:
+        print(f"  [WARNING] 请求异常: {url} - {e}")
+        return None
+
+
+def _parse_edu_level(edu_str):
+    """从字符串中解析学历等级"""
+    if not edu_str:
+        return 0
+    for key, val in _EDU_LEVEL.items():
+        if key in str(edu_str):
+            return val
+    return 0
+
+
+def _parse_exp_level(exp_str):
+    """从字符串中解析经验等级"""
+    if not exp_str:
+        return 0
+    for key, val in _EXP_LEVEL.items():
+        if key in str(exp_str):
+            return val
+    m = re.search(r"(\d+)\s*年", str(exp_str))
+    if m:
+        years = int(m.group(1))
+        if years <= 1:
+            return 1
+        elif years <= 3:
+            return 2
+        elif years <= 5:
+            return 3
+        elif years <= 10:
+            return 4
+        else:
+            return 5
+    return 0
+
+
+def _parse_experience_years(exp_str):
+    """从用户经验字符串中解析年数"""
+    if not exp_str:
+        return 0
+    m = re.search(r"(\d+)", str(exp_str))
+    return int(m.group(1)) if m else 0
+
+
+def _random_delay():
+    """随机延迟，避免频繁请求"""
+    time.sleep(random.uniform(1.0, 2.0))
+
+
+def _extract_section(text, keywords, max_lines=10):
+    """从岗位描述中提取特定部分（职责/要求等）"""
+    if not text:
+        return ""
+    all_headers = [
+        "岗位职责", "工作内容", "职位描述", "工作职责", "主要职责",
+        "任职要求", "岗位要求", "任职资格", "任职条件", "应聘条件",
+        "福利待遇", "薪酬福利", "工作时间", "工作地点", "联系方式",
+    ]
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if not lines:
+        return ""
+    start_idx = -1
+    for i, line in enumerate(lines):
+        if any(kw in line for kw in keywords):
+            start_idx = i
+            break
+    if start_idx < 0:
+        return ""
+    result = []
+    for i in range(start_idx, len(lines)):
+        line = lines[i]
+        if i > start_idx and any(h in line for h in all_headers):
+            if not any(kw in line for kw in keywords):
+                break
+        result.append(line)
+        if len(result) >= max_lines:
+            break
+    return "\n".join(result) if result else ""
+
+
+def _extract_responsibilities(contents):
+    """从岗位描述中提取岗位职责"""
+    if not contents:
+        return "详见岗位详情页"
+    resp = _extract_section(contents, ["岗位职责", "工作内容", "职位描述", "工作职责", "主要职责"])
+    if resp:
+        return resp
+    lines = [l.strip() for l in contents.split("\n") if l.strip()]
+    return "\n".join(lines[:8]) if lines else "详见岗位详情页"
+
+
+def _extract_requirements(contents, edu_str="", exp_str=""):
+    """从岗位描述中提取任职要求"""
+    if not contents:
+        parts = []
+        if edu_str:
+            parts.append(f"学历要求：{edu_str}")
+        if exp_str:
+            parts.append(f"经验要求：{exp_str}")
+        return "\n".join(parts) if parts else "详见岗位详情页"
+    req = _extract_section(contents, ["任职要求", "岗位要求", "任职资格", "任职条件", "应聘条件"])
+    if req:
+        return req
+    lines = contents.split("\n")
+    req_lines = [l.strip() for l in lines if any(kw in l for kw in ["要求", "具备", "熟悉", "掌握", "优先", "以上"])]
+    if req_lines:
+        return "\n".join(req_lines[:8])
+    parts = []
+    if edu_str:
+        parts.append(f"学历要求：{edu_str}")
+    if exp_str:
+        parts.append(f"经验要求：{exp_str}")
+    return "\n".join(parts) if parts else "详见岗位详情页"
+
+
+def _generate_benefits(contents):
+    """从岗位描述中提取福利待遇"""
+    if not contents:
+        return "五险一金/年终奖/带薪年假/定期体检"
+    benefit_keywords = [
+        "五险一金", "六险二金", "五险二金", "七险一金", "七险二金",
+        "年终奖", "年底双薪", "带薪年假", "餐补", "免费三餐", "免费午餐",
+        "交通补贴", "通讯补贴", "住房补贴", "体检", "补充医疗", "商业保险",
+        "弹性工作", "周末双休", "双休", "股票期权", "期权", "培训", "团建",
+    ]
+    found = []
+    text = str(contents)
+    for kw in benefit_keywords:
+        if kw in text:
+            found.append(kw)
+    if found:
+        seen = set()
+        unique = []
+        for b in found:
+            if b not in seen:
+                seen.add(b)
+                unique.append(b)
+        return "/".join(unique)
+    return "五险一金/年终奖/带薪年假/定期体检"
+
+
+def _determine_enterprise_type(info_str, source):
+    """根据公司信息字符串判断企业类型"""
+    text = str(info_str) if info_str else ""
+    if any(kw in text for kw in ["央企", "国企", "国有", "国资委", "中央企业"]):
+        return "国企"
+    if any(kw in text for kw in ["外资", "外企", "合资", "外商独资"]):
+        return "外企"
+    if source in ["国聘网", "国资委央企招聘"]:
+        return "国企"
+    return "私企"
+
+
+def _generate_development(enterprise_type):
+    """根据企业类型生成职业发展前景描述"""
+    if enterprise_type == "国企":
+        return "国企平台稳定，晋升通道清晰，福利保障完善"
+    elif enterprise_type == "外企":
+        return "国际化平台，职业发展路径多元，薪酬体系完善"
+    else:
+        return "市场化薪酬，成长空间大，适合快速积累经验"
+
+
+def _is_city_match(job_location, user_city):
+    """判断岗位地点是否匹配用户城市"""
+    if not job_location or not user_city:
+        return False
+    job_loc = str(job_location).replace("市", "").strip()
+    user_c = str(user_city).replace("市", "").strip()
+    return user_c in job_loc or job_loc in user_c
+
+
+# ============ 匹配度计算 ============
+def calculate_match_score(job, user):
+    """
+    计算岗位与用户的匹配度 (0-100)。
+    学历匹配(25) + 经验匹配(25) + 方向匹配(30) + 城市匹配(20)
+    """
+    score = 0
+    # 学历匹配 (0-25)
+    user_edu = user.get("degree") or user.get("education") or ""
+    job_edu = job.get("_raw_edu", "")
+    user_edu_level = _parse_edu_level(user_edu)
+    job_edu_level = _parse_edu_level(job_edu)
+    if job_edu_level == 0:
+        score += 20
+    elif user_edu_level >= job_edu_level:
+        score += 25
+    elif user_edu_level == job_edu_level - 1:
+        score += 15
+    else:
+        score += 5
+    # 经验匹配 (0-25)
+    user_exp = user.get("experience") or ""
+    job_exp = job.get("_raw_exp", "")
+    user_exp_level = _parse_exp_level(user_exp)
+    job_exp_level = _parse_exp_level(job_exp)
+    if job_exp_level == 0:
+        score += 20
+    elif user_exp_level >= job_exp_level:
+        score += 25
+    elif user_exp_level == job_exp_level - 1:
+        score += 15
+    else:
+        score += 5
+    # 方向匹配 (0-30)
+    user_field = (user.get("field") or user.get("direction") or "").lower().strip()
+    job_title = (job.get("job_title") or "").lower()
+    job_desc = (job.get("_raw_contents") or "").lower()
+    if user_field:
+        if user_field in job_title:
+            score += 30
+        elif any(w in job_title for w in user_field.split() if len(w) >= 2):
+            score += 20
+        elif user_field in job_desc:
+            score += 15
+        else:
+            field_kws = [w for w in re.split(r"[/\-_,，\s]+", user_field) if len(w) >= 2]
+            match_cnt = sum(1 for kw in field_kws if kw in job_title or kw in job_desc)
+            score += min(match_cnt * 8, 20) if match_cnt > 0 else 5
+    else:
+        score += 10
+    # 城市匹配 (0-20)
+    user_city = user.get("city", "")
+    job_location = job.get("work_location", "")
+    if _is_city_match(job_location, user_city):
+        score += 20
+    elif job_location:
+        score += 5
+    else:
+        score += 5
+    return max(0, min(100, score))
+
+
+# ============ 爬虫：国聘网（API）============
+def crawl_iguopin(keyword, city=None):
+    """爬取国聘网（国资央企招聘平台）岗位数据，使用公开API"""
+    print(f"\n[国聘网] 开始爬取，关键词: {keyword}，城市: {city}")
+    api_url = "https://gp-api.iguopin.com/api/jobs/v1/list"
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "Device": "pc",
+        "Subsite": "cujiuye",
+        "Version": "5.0.0",
+        "User-Agent": COMMON_UA,
+        "Referer": "https://www.iguopin.com/",
+        "Origin": "https://www.iguopin.com",
+    }
+    payload = {"page": 1, "page_size": 50, "keyword": keyword}
+    resp = _safe_request(api_url, method="POST", headers=headers, json_body=payload)
+    if not resp:
+        print("[国聘网] API请求失败")
+        return []
+    try:
+        data = resp.json()
+    except Exception as e:
+        print(f"[国聘网] JSON解析失败: {e}")
+        return []
+    job_list = []
+    if isinstance(data, dict):
+        job_list = data.get("data", {}).get("list", [])
+    elif isinstance(data, list):
+        job_list = data
+    print(f"[国聘网] API返回 {len(job_list)} 条岗位")
+    results = []
+    for item in job_list:
+        try:
+            job_id = item.get("job_id") or item.get("id") or ""
+            job_name = item.get("job_name") or item.get("name") or ""
+            company_name = item.get("company_name") or item.get("company") or ""
+            if not job_name or not company_name:
+                continue
+            min_wage = item.get("min_wage") or ""
+            max_wage = item.get("max_wage") or ""
+            if min_wage and max_wage:
+                salary_range = f"{min_wage}-{max_wage}元/月"
+            elif min_wage:
+                salary_range = f"{min_wage}元/月起"
+            else:
+                salary_range = item.get("salary") or "面议"
+            edu = item.get("education_cn") or item.get("education") or ""
+            exp = item.get("experience_cn") or item.get("experience") or item.get("work_years") or ""
+            district_list = item.get("district_list") or []
+            if isinstance(district_list, list) and district_list:
+                work_location = district_list[0].get("area_cn") or ""
+            else:
+                work_location = item.get("city") or item.get("city_cn") or ""
+            contents = item.get("contents") or item.get("description") or ""
+            company_info = item.get("company_info") or {}
+            nature = company_info.get("nature_cn", "") if isinstance(company_info, dict) else str(company_info)
+            enterprise_type = _determine_enterprise_type(nature + " " + company_name, "国聘网")
+            detail_link = f"https://www.iguopin.com/job/detail?id={job_id}" if job_id else ""
+            results.append({
+                "job_title": job_name,
+                "company": company_name,
+                "enterprise_type": enterprise_type,
+                "detail_link": detail_link,
+                "salary_range": salary_range,
+                "responsibilities": _extract_responsibilities(contents),
+                "requirements": _extract_requirements(contents, edu, exp),
+                "benefits": _generate_benefits(contents),
+                "development": _generate_development(enterprise_type),
+                "work_location": work_location or "全国",
+                "source": "国聘网（真实数据）",
+                "search_keyword": keyword,
+                "_raw_contents": contents,
+                "_raw_edu": edu,
+                "_raw_exp": exp,
+            })
+        except Exception as e:
+            print(f"  [WARNING] 解析国聘网岗位失败: {e}")
+    print(f"[国聘网] 成功解析 {len(results)} 条岗位")
+    return results
+
+
+# ============ 爬虫：BOSS直聘（Playwright）============
+def crawl_boss(keyword, city=None):
+    """爬取BOSS直聘岗位数据，需要Playwright渲染JS页面"""
+    print(f"\n[BOSS直聘] 开始爬取，关键词: {keyword}，城市: {city}")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[BOSS直聘] Playwright 未安装，跳过")
+        return []
+    encoded_kw = quote(keyword)
+    url = f"https://www.zhipin.com/web/geek/job?query={encoded_kw}"
+    if city:
+        city_map = {
+            "北京": "101010100", "上海": "101020100", "广州": "101280100",
+            "深圳": "101280600", "杭州": "101210100", "成都": "101270100",
+            "长沙": "101250100", "武汉": "101200100", "南京": "101190100",
+            "西安": "101110100", "苏州": "101190400", "重庆": "101040100",
+            "天津": "101030100", "郑州": "101180100", "青岛": "101120200",
+            "厦门": "101230200", "合肥": "101220100", "济南": "101120100",
+        }
+        city_code = city_map.get(city.replace("市", ""))
+        if city_code:
+            url += f"&city={city_code}"
+    results = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=COMMON_UA, viewport={"width": 1920, "height": 1080}, locale="zh-CN",
+            )
+            page = context.new_page()
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+            """)
+            print(f"[BOSS直聘] 正在加载页面: {url}")
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+            except Exception as e:
+                print(f"[BOSS直聘] 页面加载超时或失败: {e}")
+                browser.close()
+                return []
+            wait_sec = random.randint(3, 5)
+            print(f"[BOSS直聘] 等待页面渲染 {wait_sec} 秒...")
+            page.wait_for_timeout(wait_sec * 1000)
+            page_content = page.content()
+            if "安全验证" in page_content or "验证码" in page_content:
+                print("[BOSS直聘] 被反爬拦截，跳过该网站")
+                browser.close()
+                return []
+            job_cards = page.query_selector_all(".job-card-wrapper, .search-job-result li, .job-list li")
+            if not job_cards:
+                job_cards = page.query_selector_all("[class*='job-card'], [class*='job-item']")
+            print(f"[BOSS直聘] 找到 {len(job_cards)} 个岗位卡片")
+            for card in job_cards[:30]:
+                try:
+                    title_el = card.query_selector(".job-name, .job-title, [class*='job-name']")
+                    job_title = title_el.inner_text().strip() if title_el else ""
+                    company_el = card.query_selector(".company-name, .company-info, [class*='company-name']")
+                    company_name = company_el.inner_text().strip() if company_el else ""
+                    salary_el = card.query_selector(".salary, .job-salary, [class*='salary']")
+                    salary_range = salary_el.inner_text().strip() if salary_el else "面议"
+                    area_el = card.query_selector(".job-area, .job-area-wrapper, [class*='area']")
+                    work_location = area_el.inner_text().strip() if area_el else ""
+                    edu_el = card.query_selector(".job-info .edu, [class*='edu'], .job-detail .edu")
+                    edu = edu_el.inner_text().strip() if edu_el else ""
+                    link_el = card.query_selector("a.job-card-left, a[href*='job_detail'], a")
+                    detail_link = ""
+                    if link_el:
+                        href = link_el.get_attribute("href") or ""
+                        detail_link = ("https://www.zhipin.com" + href) if href and not href.startswith("http") else href
+                    if not job_title or not company_name:
+                        continue
+                    enterprise_type = _determine_enterprise_type(company_name, "BOSS直聘")
+                    results.append({
+                        "job_title": job_title, "company": company_name,
+                        "enterprise_type": enterprise_type, "detail_link": detail_link,
+                        "salary_range": salary_range or "面议",
+                        "responsibilities": "详见岗位详情页",
+                        "requirements": f"学历要求：{edu}" if edu else "详见岗位详情页",
+                        "benefits": "详见岗位详情页",
+                        "development": _generate_development(enterprise_type),
+                        "work_location": work_location or "全国",
+                        "source": "BOSS直聘（真实数据）", "search_keyword": keyword,
+                        "_raw_contents": "", "_raw_edu": edu, "_raw_exp": "",
+                    })
+                except Exception as e:
+                    print(f"  [WARNING] 解析BOSS直聘岗位卡片失败: {e}")
+            browser.close()
+    except Exception as e:
+        print(f"[BOSS直聘] 爬取异常: {e}")
+    print(f"[BOSS直聘] 成功解析 {len(results)} 条岗位")
+    return results
+
+
+# ============ 爬虫：智联招聘（Playwright）============
+def crawl_zhaopin(keyword, city=None):
+    """爬取智联招聘岗位数据，需要Playwright渲染JS页面"""
+    print(f"\n[智联招聘] 开始爬取，关键词: {keyword}，城市: {city}")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[智联招聘] Playwright 未安装，跳过")
+        return []
+    encoded_kw = quote(keyword)
+    url = f"https://sou.zhaopin.com/?kw={encoded_kw}"
+    if city:
+        url += f"&jl={quote(city)}"
+    results = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=COMMON_UA, viewport={"width": 1920, "height": 1080}, locale="zh-CN",
+            )
+            page = context.new_page()
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+            """)
+            print(f"[智联招聘] 正在加载页面: {url}")
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+            except Exception as e:
+                print(f"[智联招聘] 页面加载超时或失败: {e}")
+                browser.close()
+                return []
+            wait_sec = random.randint(3, 5)
+            print(f"[智联招聘] 等待页面渲染 {wait_sec} 秒...")
+            page.wait_for_timeout(wait_sec * 1000)
+            page_content = page.content()
+            if "安全验证" in page_content or "验证码" in page_content:
+                print("[智联招聘] 被反爬拦截，跳过该网站")
+                browser.close()
+                return []
+            job_cards = page.query_selector_all(
+                ".joblist-box__item, .positionList .joblist-box__item, [class*='jobCard'], [class*='job-card'], .sou-job-item"
+            )
+            if not job_cards:
+                job_cards = page.query_selector_all(".joblist-box li, .resultList div")
+            print(f"[智联招聘] 找到 {len(job_cards)} 个岗位卡片")
+            for card in job_cards[:30]:
+                try:
+                    title_el = card.query_selector(".jobinfo__name, .job-name, [class*='jobName'], [class*='job-name']")
+                    job_title = title_el.inner_text().strip() if title_el else ""
+                    company_el = card.query_selector(".companyinfo__name, .company-name, [class*='companyName'], [class*='company-name']")
+                    company_name = company_el.inner_text().strip() if company_el else ""
+                    salary_el = card.query_selector(".jobinfo__salary, .salary, [class*='salary'], [class*='Salary']")
+                    salary_range = salary_el.inner_text().strip() if salary_el else "面议"
+                    area_el = card.query_selector(".jobinfo__area, .job-area, [class*='area'], [class*='city']")
+                    work_location = area_el.inner_text().strip() if area_el else ""
+                    edu_el = card.query_selector(".jobinfo__edu, .edu, [class*='edu'], [class*='degree']")
+                    edu = edu_el.inner_text().strip() if edu_el else ""
+                    link_el = card.query_selector("a[href*='jobs.zhaopin.com'], a[href*='/jobdetail'], a")
+                    detail_link = ""
+                    if link_el:
+                        href = link_el.get_attribute("href") or ""
+                        detail_link = ("https://sou.zhaopin.com" + href) if href and not href.startswith("http") else href
+                    if not job_title or not company_name:
+                        continue
+                    enterprise_type = _determine_enterprise_type(company_name, "智联招聘")
+                    results.append({
+                        "job_title": job_title, "company": company_name,
+                        "enterprise_type": enterprise_type, "detail_link": detail_link,
+                        "salary_range": salary_range or "面议",
+                        "responsibilities": "详见岗位详情页",
+                        "requirements": f"学历要求：{edu}" if edu else "详见岗位详情页",
+                        "benefits": "详见岗位详情页",
+                        "development": _generate_development(enterprise_type),
+                        "work_location": work_location or "全国",
+                        "source": "智联招聘（真实数据）", "search_keyword": keyword,
+                        "_raw_contents": "", "_raw_edu": edu, "_raw_exp": "",
+                    })
+                except Exception as e:
+                    print(f"  [WARNING] 解析智联招聘岗位卡片失败: {e}")
+            browser.close()
+    except Exception as e:
+        print(f"[智联招聘] 爬取异常: {e}")
+    print(f"[智联招聘] 成功解析 {len(results)} 条岗位")
+    return results
+
+
+# ============ 爬虫：国资委央企招聘（静态HTML）============
+def crawl_sasac(keyword, city=None):
+    """爬取国资委央企招聘公告，静态HTML用requests+BeautifulSoup"""
+    print(f"\n[国资委] 开始爬取，关键词: {keyword}")
+    sasac_urls = [
+        "http://www.sasac.gov.cn/n2588035/n2588105/index.html",
+        "https://www.sasac.gov.cn/n2588035/n2588105/index.html",
+        "http://www.sasac.gov.cn/n2588035/c15456054/list.html",
+    ]
+    resp = None
+    for url in sasac_urls:
+        resp = _safe_request(url)
+        if resp:
+            break
+        _random_delay()
+    if not resp:
+        print("[国资委] 所有URL请求均失败，跳过")
+        return []
+    try:
+        resp.encoding = resp.apparent_encoding or "utf-8"
+        soup = BeautifulSoup(resp.text, "lxml")
+    except Exception as e:
+        print(f"[国资委] HTML解析失败: {e}")
+        return []
+    results = []
+    items = soup.select("ul.list li, .list li, .news_list li, .content li, li a")
+    print(f"[国资委] 找到 {len(items)} 个列表项")
+    for item in items[:50]:
+        try:
+            link_el = item if item.name == "a" else item.find("a")
+            if not link_el:
+                continue
+            title = link_el.get_text(strip=True)
+            href = link_el.get("href", "")
+            if not title or len(title) < 5:
+                continue
+            # 关键词过滤
+            if keyword and keyword.lower() not in title.lower():
+                kw_chars = set(keyword.replace(" ", ""))
+                title_chars = set(title)
+                if len(kw_chars & title_chars) / max(len(kw_chars), 1) < 0.3:
+                    continue
+            if href and not href.startswith("http"):
+                detail_link = "http://www.sasac.gov.cn" + href if href.startswith("/") else "http://www.sasac.gov.cn/n2588035/n2588105/" + href
+            else:
+                detail_link = href
+            company_name = "国资委央企"
+            m = re.match(r"^(.+?)(?:招聘|招录|招考|公告|通知)", title)
+            if m:
+                company_name = m.group(1).strip()
+            results.append({
+                "job_title": title, "company": company_name, "enterprise_type": "国企",
+                "detail_link": detail_link, "salary_range": "详见公告",
+                "responsibilities": "详见岗位详情页", "requirements": "详见岗位详情页",
+                "benefits": "央企福利待遇（五险二金/年终奖/带薪年假）",
+                "development": "央企平台稳定，晋升通道清晰，福利保障完善",
+                "work_location": city or "全国", "source": "国资委央企招聘（真实数据）",
+                "search_keyword": keyword, "_raw_contents": "", "_raw_edu": "", "_raw_exp": "",
+            })
+        except Exception as e:
+            print(f"  [WARNING] 解析国资委岗位失败: {e}")
+    print(f"[国资委] 成功解析 {len(results)} 条岗位")
+    return results
+
+
+def filter_by_city(jobs, city, min_count=5):
+    """按城市筛选岗位，不足时补充全国岗位"""
+    if not city:
+        return jobs
+    city_jobs = [j for j in jobs if _is_city_match(j.get("work_location", ""), city)]
+    other_jobs = [j for j in jobs if not _is_city_match(j.get("work_location", ""), city)]
+    print(f"  城市筛选: 匹配{city}的岗位 {len(city_jobs)} 个，其他 {len(other_jobs)} 个")
+    if len(city_jobs) >= min_count:
+        return city_jobs
+    print(f"  {city}岗位不足{min_count}个，补充全国岗位")
+    return city_jobs + other_jobs
+
+
 # ============ 获取岗位推荐数据（由 workbuddy 爬取程序实现）============
 # TODO: 由 workbuddy 爬取程序填充此函数
 # 返回格式：list[dict]，每个 dict 包含以下字段：
@@ -153,13 +781,109 @@ def build_search_links(keyword: str, city: str, enterprise_type: str = "", job_t
 #   salary_range, responsibilities, requirements, benefits, development,
 #   work_location, source, search_keyword
 def generate_recommendations(user: dict) -> list[dict]:
-    """获取岗位推荐数据（由 workbuddy 爬取程序实现）"""
+    """获取岗位推荐数据 — 从4个招聘平台爬取真实在招岗位"""
     city = user.get('city', '')
     field = user.get('field', '')
+    degree = user.get('degree', '')
+    experience = user.get('experience', '')
     print(f"[推荐] 用户 {user.get('id')} 的岗位推荐由 workbuddy 爬取程序生成")
-    print(f"[推荐] 求职方向: {field}, 城市: {city}")
-    # TODO: 在此实现爬取逻辑
-    return []
+    print(f"[推荐] 求职方向: {field}, 城市: {city}, 学历: {degree}, 经验: {experience}")
+
+    if not field:
+        print("[ERROR] 缺少求职方向关键词")
+        return []
+
+    all_jobs = []
+
+    # 1. 国聘网（最高优先级，公开API）
+    try:
+        print("\n>>> [1/4] 爬取国聘网...")
+        iguopin_jobs = crawl_iguopin(field, city)
+        all_jobs.extend(iguopin_jobs)
+        print(f"国聘网返回 {len(iguopin_jobs)} 条，累计 {len(all_jobs)} 条")
+    except Exception as e:
+        print(f"[国聘网] 爬取失败: {e}")
+
+    # 2. BOSS直聘（Playwright渲染）
+    try:
+        print("\n>>> [2/4] 爬取BOSS直聘...")
+        _random_delay()
+        boss_jobs = crawl_boss(field, city)
+        all_jobs.extend(boss_jobs)
+        print(f"BOSS直聘返回 {len(boss_jobs)} 条，累计 {len(all_jobs)} 条")
+    except Exception as e:
+        print(f"[BOSS直聘] 爬取失败: {e}")
+
+    # 3. 智联招聘（Playwright渲染）
+    try:
+        print("\n>>> [3/4] 爬取智联招聘...")
+        _random_delay()
+        zhaopin_jobs = crawl_zhaopin(field, city)
+        all_jobs.extend(zhaopin_jobs)
+        print(f"智联招聘返回 {len(zhaopin_jobs)} 条，累计 {len(all_jobs)} 条")
+    except Exception as e:
+        print(f"[智联招聘] 爬取失败: {e}")
+
+    # 4. 国资委央企招聘（静态HTML）
+    try:
+        print("\n>>> [4/4] 爬取国资委央企招聘...")
+        _random_delay()
+        sasac_jobs = crawl_sasac(field, city)
+        all_jobs.extend(sasac_jobs)
+        print(f"国资委返回 {len(sasac_jobs)} 条，累计 {len(all_jobs)} 条")
+    except Exception as e:
+        print(f"[国资委] 爬取失败: {e}")
+
+    # 去重
+    print(f"\n去重前: {len(all_jobs)} 条")
+    seen = set()
+    deduped = []
+    for job in all_jobs:
+        key = (job.get("job_title", "").lower(), job.get("company", "").lower())
+        if key not in seen:
+            seen.add(key)
+            deduped.append(job)
+    print(f"去重后: {len(deduped)} 条")
+
+    # 城市筛选
+    print("\n按城市筛选...")
+    filtered = filter_by_city(deduped, city, min_count=5)
+
+    # 计算匹配度
+    print("\n计算匹配度...")
+    for job in filtered:
+        job["match_score"] = calculate_match_score(job, user)
+
+    # 按匹配度排序
+    filtered.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+
+    # 清理临时字段 + 生成 search_links
+    for job in filtered:
+        job.pop("_raw_contents", None)
+        job.pop("_raw_edu", None)
+        job.pop("_raw_exp", None)
+        # 调用已有的 build_search_links 生成多平台搜索链接
+        job["search_links"] = build_search_links(
+            keyword=job.get("job_title", ""),
+            city=city,
+            enterprise_type=job.get("enterprise_type", ""),
+            job_title=job.get("job_title", ""),
+        )
+
+    # 限制返回数量（最多20条）
+    result = filtered[:20]
+
+    print("\n" + "=" * 50)
+    print(f"岗位推荐生成完成！共 {len(result)} 条岗位")
+    source_count = {}
+    for job in result:
+        src = job.get("source", "未知")
+        source_count[src] = source_count.get(src, 0) + 1
+    for src, cnt in source_count.items():
+        print(f"  {src}: {cnt} 条")
+    print("=" * 50)
+
+    return result
 
 
 # ============ 写入推荐结果 ============

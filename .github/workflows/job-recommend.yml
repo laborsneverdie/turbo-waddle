@@ -8,7 +8,7 @@ on:
 jobs:
   recommend:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: 检出代码
@@ -23,6 +23,9 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: 安装 Playwright 浏览器
+        run: python -m playwright install chromium --with-deps
 
       - name: 执行推荐脚本
         env:
