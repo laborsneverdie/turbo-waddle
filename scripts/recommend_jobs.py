@@ -552,17 +552,24 @@ def crawl_boss(keyword, city=None):
                 print(f"[BOSS直聘] 页面加载超时或失败: {e}")
                 browser.close()
                 return []
-            wait_sec = random.randint(3, 5)
-            print(f"[BOSS直聘] 等待页面渲染 {wait_sec} 秒...")
+            # 等待列表容器渲染（2026年最新选择器：.job-list-box）
+            try:
+                page.wait_for_selector('.job-list-box', state='visible', timeout=15000)
+                print(f"[BOSS直聘] 列表容器已出现")
+            except Exception:
+                print(f"[BOSS直聘] 列表容器未出现，打印页面标题: {page.title()}")
+            wait_sec = random.randint(2, 4)
+            print(f"[BOSS直聘] 等待渲染 {wait_sec} 秒...")
             page.wait_for_timeout(wait_sec * 1000)
             page_content = page.content()
             if "安全验证" in page_content or "验证码" in page_content:
                 print("[BOSS直聘] 被反爬拦截，跳过该网站")
                 browser.close()
                 return []
-            job_cards = page.query_selector_all(".job-card-wrapper, .search-job-result li, .job-list li")
+            # 2026年最新选择器
+            job_cards = page.query_selector_all('.job-list-box .job-card-wrapper, .job-card-wrapper, .job-list-box > li')
             if not job_cards:
-                job_cards = page.query_selector_all("[class*='job-card'], [class*='job-item']")
+                job_cards = page.query_selector_all('[class*="job-card"], [class*="job-item"], .search-job-result li')
             print(f"[BOSS直聘] 找到 {len(job_cards)} 个岗位卡片")
             for card in job_cards[:30]:
                 try:
@@ -641,19 +648,33 @@ def crawl_zhaopin(keyword, city=None):
                 print(f"[智联招聘] 页面加载超时或失败: {e}")
                 browser.close()
                 return []
-            wait_sec = random.randint(3, 5)
-            print(f"[智联招聘] 等待页面渲染 {wait_sec} 秒...")
+            # 等待列表容器渲染
+            list_selectors = ['.positionlist', '.joblist-box', '.search-result-list', '[class*="position"]', '[class*="joblist"]']
+            for sel in list_selectors:
+                try:
+                    page.wait_for_selector(sel, state='visible', timeout=5000)
+                    print(f"[智联招聘] 找到列表容器: {sel}")
+                    break
+                except Exception:
+                    continue
+            else:
+                print(f"[智联招聘] 未找到任何列表容器，打印页面标题: {page.title()}")
+            wait_sec = random.randint(2, 4)
+            print(f"[智联招聘] 等待渲染 {wait_sec} 秒...")
             page.wait_for_timeout(wait_sec * 1000)
             page_content = page.content()
             if "安全验证" in page_content or "验证码" in page_content:
                 print("[智联招聘] 被反爬拦截，跳过该网站")
                 browser.close()
                 return []
+            # 尝试多种选择器
             job_cards = page.query_selector_all(
-                ".joblist-box__item, .positionList .joblist-box__item, [class*='jobCard'], [class*='job-card'], .sou-job-item"
+                ".joblist-box__item, .positionlist .joblist-box__item, "
+                "[class*='jobCard'], [class*='job-card'], [class*='jobList__item'], "
+                ".sou-result-item, .search-result-item, [class*='result-item']"
             )
             if not job_cards:
-                job_cards = page.query_selector_all(".joblist-box li, .resultList div")
+                job_cards = page.query_selector_all(".joblist-box li, .resultList div, [class*='search'] li")
             print(f"[智联招聘] 找到 {len(job_cards)} 个岗位卡片")
             for card in job_cards[:30]:
                 try:
