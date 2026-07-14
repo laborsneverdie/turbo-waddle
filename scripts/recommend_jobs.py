@@ -1580,13 +1580,18 @@ def crawl_national_soe(keyword, city=None):
         soe_urls = soe.get("urls", [soe.get("url", "")])
         print(f"  [{soe_name}] 尝试爬取...")
         soe_results = []
+        had_http_response = False  # 是否收到过非网络错误的HTTP响应
 
         for url in soe_urls:
             resp = _safe_request(url, verify_ssl=False)
             if not resp:
+                # 检查是否是网络错误（非HTTP错误）—— DNS/连接/超时
+                # 如果是网络错误，标记为不可达。如果是HTTP错误(404/412/502)，服务器存在。
+                # 我们在 _safe_request 中无法区分，但通过返回值是否为None来统一处理。
                 _random_delay()
                 continue
 
+            had_http_response = True
             try:
                 resp.encoding = resp.apparent_encoding or "utf-8"
                 soup = BeautifulSoup(resp.text, "lxml")
@@ -1672,9 +1677,12 @@ def crawl_national_soe(keyword, city=None):
 
             _random_delay()
 
-        # 如果静态解析失败，尝试 Playwright
-        if not soe_results:
+        # 如果静态解析失败且有HTTP响应，尝试 Playwright 兜底
+        # 如果从未收到过HTTP响应（纯网络错误），跳过 Playwright 避免浪费20秒超时
+        if not soe_results and had_http_response:
             soe_results = _crawl_soe_with_playwright(soe_name, soe_urls, keyword, city)
+        elif not soe_results and not had_http_response:
+            print(f"    [{soe_name}] 所有URL网络不可达，跳过 Playwright 兜底")
 
         results.extend(soe_results)
         print(f"  [{soe_name}] 共获取 {len(soe_results)} 条")
@@ -1709,8 +1717,8 @@ def _crawl_soe_with_playwright(soe_name, urls, keyword, city):
             for url in urls:
                 try:
                     print(f"    [{soe_name}] Playwright 加载: {url}")
-                    page.goto(url, wait_until="domcontentloaded", timeout=SITE_TIMEOUT * 1000)
-                    page.wait_for_timeout(3000)
+                    page.goto(url, wait_until="domcontentloaded", timeout=10000)  # 已失败过，降到10s
+                    page.wait_for_timeout(2000)  # 已失败过，降到2s
 
                     # 通用选择器探测
                     selectors = [
@@ -1794,6 +1802,7 @@ def crawl_local_soe(keyword, city=None):
         soe_urls = soe.get("urls", [soe.get("url", "")])
 
         soe_results = []
+        had_http_response = False  # 是否收到过非网络错误的HTTP响应
 
         # 先直接使用 SOE 配置中的 URL（已经过验证的招聘页面）
         for url in soe_urls:
@@ -1804,6 +1813,8 @@ def crawl_local_soe(keyword, city=None):
             if not resp:
                 _random_delay()
                 continue
+
+            had_http_response = True
 
             try:
                 resp.encoding = resp.apparent_encoding or "utf-8"
@@ -1857,8 +1868,9 @@ def crawl_local_soe(keyword, city=None):
 
             _random_delay()
 
-        # 如果 requests 失败，用 Playwright 兜底（处理 SSL 旧证书网站）
-        if not soe_results:
+        # 如果有HTTP响应但HTML解析失败，用 Playwright 兜底
+        # 如果从未收到过HTTP响应（纯网络错误），跳过 Playwright 避免浪费20秒超时
+        if not soe_results and had_http_response:
             try:
                 from playwright.sync_api import sync_playwright
                 with sync_playwright() as p:
