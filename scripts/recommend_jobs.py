@@ -847,9 +847,9 @@ def _auto_detect_job_cards(page, site_name):
             const salaryPattern = /\\d+[kK万]|元\\/月|元\\/天|薪|面议|月薪|年薪|\\d+-\\d+/;
             const companyPattern = /公司|集团|有限|科技|股份|控股|研究院|研究所|中心|局|院|厂/;
 
-            // 排除非内容区域（footer、nav、header、sidebar等，含文本匹配）
-            const excludeClsPattern = /footer|nav-bar|sidebar|header|popup|modal|copyright|banner|notice-bar|login|register|toolbar|menu/;
-            const excludeTextPattern = /版权所有|Copyright|copyight|ICP备|备案号|公司首页|官方微博|官方微信|APP下载/;
+            // 排除非内容区域（footer、nav、header、sidebar、filter等，含文本匹配）
+            const excludeClsPattern = /footer|nav-bar|sidebar|header|popup|modal|copyright|banner|notice-bar|login|register|toolbar|menu|filter-condition|pagination|page/;
+            const excludeTextPattern = /版权所有|Copyright|copyight|ICP备|备案号|公司首页|官方微博|官方微信|APP下载|常见问题|清空$|^城市$/;
             function isExcluded(el) {
                 // 检查 class 名排除
                 let current = el;
@@ -858,7 +858,7 @@ def _auto_detect_job_cards(page, site_name):
                     if (excludeClsPattern.test(cls)) return true;
                     current = current.parentElement;
                 }
-                // 检查文本内容排除（避免版权/备案/导航等非岗位区域）
+                // 检查文本内容排除（避免版权/备案/导航/筛选栏等非岗位区域）
                 const text = (el.innerText || '').substring(0, 200);
                 if (excludeTextPattern.test(text)) return true;
                 return false;
@@ -869,12 +869,12 @@ def _auto_detect_job_cards(page, site_name):
             const allElements = document.querySelectorAll('*');
 
             for (const el of allElements) {
+                // 先排除非内容区域（在 class 检查之前）
+                if (isExcluded(el)) continue;
+
                 const cls = el.className || '';
                 const clsStr = typeof cls === 'string' ? cls : '';
                 if (!jobKeywords.test(clsStr)) continue;
-
-                // 排除 footer/nav/header/sidebar 等非内容区域
-                if (isExcluded(el)) continue;
 
                 // 检查元素内是否包含疑似薪资或公司信息
                 const text = el.innerText || '';
@@ -959,16 +959,35 @@ def _auto_detect_job_cards(page, site_name):
         if not markers:
             return []
 
-        # 根据标记的 data 属性获取元素
+        # Python 层面的二次过滤：排除疑似非岗位区域（版权/页脚/筛选栏等）
+        _EXCLUDE_CLS_RE = re.compile(
+            r"footer|nav-bar|sidebar|header|popup|modal|copyright|banner"
+            r"|notice-bar|login|register|toolbar|menu|pagination|page"
+            r"|filter-condition|bg-|navbar",
+            re.IGNORECASE,
+        )
+        _EXCLUDE_TXT_RE = re.compile(
+            r"版权所有|Copyright|copyight|ICP备|备案号|公司首页|官方微博"
+            r"|官方微信|APP下载|常见问题|清空\s*$|^城市\s*$",
+        )
+
         cards = []
         for m in markers:
+            cls_str = m.get("cls", "")
+            prw_str = m.get("preview", "")
+
+            if _EXCLUDE_CLS_RE.search(cls_str):
+                continue
+            if _EXCLUDE_TXT_RE.search(prw_str):
+                continue
+
             sel = f"[data-auto-card='{m['marker']}']"
             try:
                 el = page.query_selector(sel)
                 if el:
                     cards.append(el)
                     # 记录探测到的选择器，便于下次更新预设选择器
-                    print(f"  [{site_name}] 探测到卡片: class='{m['cls'][:60]}' 预览: {m['preview'][:50]}...")
+                    print(f"  [{site_name}] 探测到卡片: class='{cls_str[:60]}' 预览: {prw_str[:50]}...")
             except Exception:
                 continue
 
