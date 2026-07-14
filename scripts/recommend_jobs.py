@@ -847,15 +847,20 @@ def _auto_detect_job_cards(page, site_name):
             const salaryPattern = /\\d+[kK万]|元\\/月|元\\/天|薪|面议|月薪|年薪|\\d+-\\d+/;
             const companyPattern = /公司|集团|有限|科技|股份|控股|研究院|研究所|中心|局|院|厂/;
 
-            // 排除非内容区域（footer、nav、header、sidebar等）
-            const excludePattern = /footer|nav-bar|sidebar|header|popup|modal|copyright|banner|notice-bar|login|register|toolbar|menu/;
+            // 排除非内容区域（footer、nav、header、sidebar等，含文本匹配）
+            const excludeClsPattern = /footer|nav-bar|sidebar|header|popup|modal|copyright|banner|notice-bar|login|register|toolbar|menu/;
+            const excludeTextPattern = /版权所有|Copyright|copyight|ICP备|备案号|公司首页|官方微博|官方微信|APP下载/;
             function isExcluded(el) {
+                // 检查 class 名排除
                 let current = el;
                 while (current && current !== document.body) {
                     const cls = (current.className || '').toString();
-                    if (excludePattern.test(cls)) return true;
+                    if (excludeClsPattern.test(cls)) return true;
                     current = current.parentElement;
                 }
+                // 检查文本内容排除（避免版权/备案/导航等非岗位区域）
+                const text = (el.innerText || '').substring(0, 200);
+                if (excludeTextPattern.test(text)) return true;
                 return false;
             }
 
