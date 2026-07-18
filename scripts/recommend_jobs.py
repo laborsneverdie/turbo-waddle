@@ -19,6 +19,7 @@
 import json
 import time
 import re
+import os
 import random
 import urllib.parse
 from datetime import datetime
@@ -614,6 +615,13 @@ def calculate_match_score(job, user):
         en_skills = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', user_field)]
         cn_roles = re.findall(r'[\u4e00-\u9fff]+', user_field)
 
+        # 生成中文双字词（bigrams），适配"财务会计"→"财务"+"会计"的部分匹配
+        cn_bigrams = set()
+        for role in cn_roles:
+            if len(role) >= 2:
+                for i in range(len(role) - 1):
+                    cn_bigrams.add(role[i:i+2])
+
         # 1. 完整字段匹配在标题中 → 满分
         if user_field in job_title:
             score += 50
@@ -626,10 +634,28 @@ def calculate_match_score(job, user):
         # 4. 英文技能词出现在描述中
         elif en_skills and any(kw in job_desc for kw in en_skills):
             score += 20
-        # 5. 中文角色词出现在标题中 (如"开发"匹配但不含具体技能)
+        # 5. 中文 bigram 匹配标题 — 纯中文方向的核心逻辑
+        elif cn_bigrams:
+            title_bigram_match = sum(1 for bg in cn_bigrams if bg in job_title)
+            title_bigram_ratio = title_bigram_match / len(cn_bigrams) if cn_bigrams else 0
+            if title_bigram_ratio >= 0.5:
+                score += 40  # 标题中大部分 bigram 命中
+            elif title_bigram_match > 0:
+                score += 25  # 标题中部分 bigram 命中
+            else:
+                # 标题不匹配，看描述
+                desc_bigram_match = sum(1 for bg in cn_bigrams if bg in job_desc)
+                desc_bigram_ratio = desc_bigram_match / len(cn_bigrams) if cn_bigrams else 0
+                if desc_bigram_ratio >= 0.5:
+                    score += 15  # 描述中大部分命中
+                elif desc_bigram_match > 0:
+                    score += 8   # 描述中少量命中
+                else:
+                    score += 0   # 完全不命中
+        # 6. 中文角色词出现在标题中 (短词后备)
         elif cn_roles and any(kw in job_title for kw in cn_roles):
             score += 10
-        # 6. 中文角色词出现在描述中
+        # 7. 中文角色词出现在描述中
         elif cn_roles and any(kw in job_desc for kw in cn_roles):
             score += 5
         # 7. 完全不对口
@@ -1162,76 +1188,178 @@ def crawl_boss(keyword, city=None):
             ]
             job_cards = _find_job_cards(page, boss_selectors, "BOSS直聘")
 
-            for card in job_cards[:30]:  # 最多取30个
+            # ★ 批量 JS 提取：避免逐个 ElementHandle 操作时 context 丢失
+            # BOSS直聘页面会动态重渲染 DOM，导致 ElementHandle 失效（"Cannot find context"）
+            # 改为在单次 page.evaluate 中一次性提取所有卡片数据
+            if job_cards:
+                print(f"[BOSS直聘] 使用批量JS提取 {min(len(job_cards), 30)} 个卡片数据...")
                 try:
-                    # 岗位名称
-                    job_title = _extract_text(card, [
-                        ".job-name", ".job-title", "[class*='job-name']",
-                        ".job-info .name", "span[title]",
-                    ])
+                    extracted_data = page.evaluate("""
+                        () => {
+                            const cards = document.querySelectorAll(
+                                'li[ka], .job-card-wrapper, .search-job-result li, ' +
+                                '.job-list li, [class*="job-card"], [class*="job-item"], ' +
+                                '.job-card-body, ul.job-list-box li'
+                            );
+                            const results = [];
+                            for (const card of cards) {
+                                if (results.length >= 30) break;
+                                try {
+                                    // 岗位名称
+                                    let jobTitle = '';
+                                    const titleSels = ['.job-name', '.job-title', '[class*="job-name"]', '.job-info .name', 'span[title]'];
+                                    for (const sel of titleSels) {
+                                        const el = card.querySelector(sel);
+                                        if (el && el.innerText.trim()) { jobTitle = el.innerText.trim(); break; }
+                                    }
 
-                    # 公司名称
-                    company_name = _extract_text(card, [
-                        ".company-name", ".company-info", "[class*='company-name']",
-                        ".company-info .name", "[class*='companyName']",
-                    ])
+                                    // 公司名称
+                                    let companyName = '';
+                                    const compSels = ['.company-name', '.company-info', '[class*="company-name"]', '.company-info .name', '[class*="companyName"]'];
+                                    for (const sel of compSels) {
+                                        const el = card.querySelector(sel);
+                                        if (el && el.innerText.trim()) { companyName = el.innerText.trim(); break; }
+                                    }
 
-                    # 薪资
-                    salary_range = _extract_text(card, [
-                        ".salary", ".job-salary", "[class*='salary']",
-                        ".job-info .salary", ".red",
-                    ]) or "面议"
+                                    // 薪资
+                                    let salary = '';
+                                    const salSels = ['.salary', '.job-salary', '[class*="salary"]', '.job-info .salary', '.red'];
+                                    for (const sel of salSels) {
+                                        const el = card.querySelector(sel);
+                                        if (el && el.innerText.trim()) { salary = el.innerText.trim(); break; }
+                                    }
 
-                    # 地点
-                    work_location = _extract_text(card, [
-                        ".job-area", ".job-area-wrapper", "[class*='area']",
-                        ".job-info .job-area", "[class*='city']",
-                    ])
+                                    // 地点
+                                    let workLocation = '';
+                                    const areaSels = ['.job-area', '.job-area-wrapper', '[class*="area"]', '.job-info .job-area', '[class*="city"]'];
+                                    for (const sel of areaSels) {
+                                        const el = card.querySelector(sel);
+                                        if (el && el.innerText.trim()) { workLocation = el.innerText.trim(); break; }
+                                    }
 
-                    # 学历要求
-                    edu = _extract_text(card, [
-                        ".job-info .edu", "[class*='edu']", ".job-detail .edu",
-                        ".job-info span", "[class*='degree']",
-                    ])
+                                    // 学历
+                                    let edu = '';
+                                    const eduSels = ['.job-info .edu', '[class*="edu"]', '.job-detail .edu', '[class*="degree"]'];
+                                    for (const sel of eduSels) {
+                                        const el = card.querySelector(sel);
+                                        if (el && el.innerText.trim()) { edu = el.innerText.trim(); break; }
+                                    }
 
-                    # 详情链接
-                    detail_link = ""
-                    link_el = card.query_selector(
-                        "a.job-card-left, a[href*='job_detail'], a[href*='/job/'], a"
-                    )
-                    if link_el:
-                        href = link_el.get_attribute("href") or ""
-                        if href and not href.startswith("http"):
-                            detail_link = "https://www.zhipin.com" + href
-                        else:
-                            detail_link = href
+                                    // 详情链接
+                                    let detailLink = '';
+                                    const linkEl = card.querySelector('a.job-card-left, a[href*="job_detail"], a[href*="/job/"], a');
+                                    if (linkEl) {
+                                        let href = linkEl.getAttribute('href') || '';
+                                        if (href && !href.startsWith('http')) {
+                                            detailLink = 'https://www.zhipin.com' + href;
+                                        } else {
+                                            detailLink = href;
+                                        }
+                                    }
 
-                    if not job_title or not company_name:
-                        continue
+                                    if (jobTitle && companyName) {
+                                        results.push({ jobTitle, companyName, salary, workLocation, edu, detailLink });
+                                    }
+                                } catch(e) { continue; }
+                            }
+                            return results;
+                        }
+                    """)
 
-                    enterprise_type = _determine_enterprise_type(company_name, "BOSS直聘")
+                    print(f"[BOSS直聘] 批量JS提取到 {len(extracted_data)} 条有效数据")
 
-                    job_obj = {
-                        "job_title": job_title,
-                        "company": company_name,
-                        "enterprise_type": enterprise_type,
-                        "detail_link": detail_link,
-                        "salary_range": salary_range if salary_range else "面议",
-                        "responsibilities": "详见岗位详情页",
-                        "requirements": f"学历要求：{edu}" if edu else "详见岗位详情页",
-                        "benefits": "详见岗位详情页",
-                        "development": _generate_development(enterprise_type, "BOSS直聘"),
-                        "work_location": work_location or "全国",
-                        "source": "BOSS直聘（真实数据）",
-                        "search_keyword": keyword,
-                        "_raw_contents": "",
-                        "_raw_edu": edu,
-                        "_raw_exp": "",
-                    }
-                    results.append(job_obj)
+                    for item in extracted_data:
+                        try:
+                            job_title = item.get("jobTitle", "")
+                            company_name = item.get("companyName", "")
+                            if not job_title or not company_name:
+                                continue
+
+                            salary_range = item.get("salary", "") or "面议"
+                            work_location = item.get("workLocation", "") or "全国"
+                            edu = item.get("edu", "")
+                            detail_link = item.get("detailLink", "")
+
+                            enterprise_type = _determine_enterprise_type(company_name, "BOSS直聘")
+
+                            job_obj = {
+                                "job_title": job_title,
+                                "company": company_name,
+                                "enterprise_type": enterprise_type,
+                                "detail_link": detail_link,
+                                "salary_range": salary_range,
+                                "responsibilities": "详见岗位详情页",
+                                "requirements": f"学历要求：{edu}" if edu else "详见岗位详情页",
+                                "benefits": "详见岗位详情页",
+                                "development": _generate_development(enterprise_type, "BOSS直聘"),
+                                "work_location": work_location,
+                                "source": "BOSS直聘（真实数据）",
+                                "search_keyword": keyword,
+                                "_raw_contents": "",
+                                "_raw_edu": edu,
+                                "_raw_exp": "",
+                            }
+                            results.append(job_obj)
+                        except Exception as e:
+                            print(f"  [WARNING] 解析BOSS直聘批量数据失败: {e}")
+                            continue
+
                 except Exception as e:
-                    print(f"  [WARNING] 解析BOSS直聘岗位卡片失败: {e}")
-                    continue
+                    print(f"[BOSS直聘] 批量JS提取异常: {e}")
+                    # 回退到逐个解析（可能仍会失败，但作为最后手段）
+                    print("[BOSS直聘] 回退到逐个ElementHandle解析...")
+                    for card in job_cards[:30]:
+                        try:
+                            job_title = _extract_text(card, [
+                                ".job-name", ".job-title", "[class*='job-name']",
+                                ".job-info .name", "span[title]",
+                            ])
+                            company_name = _extract_text(card, [
+                                ".company-name", ".company-info", "[class*='company-name']",
+                                ".company-info .name", "[class*='companyName']",
+                            ])
+                            salary_range = _extract_text(card, [
+                                ".salary", ".job-salary", "[class*='salary']",
+                                ".job-info .salary", ".red",
+                            ]) or "面议"
+                            work_location = _extract_text(card, [
+                                ".job-area", ".job-area-wrapper", "[class*='area']",
+                                ".job-info .job-area", "[class*='city']",
+                            ])
+                            edu = _extract_text(card, [
+                                ".job-info .edu", "[class*='edu']", ".job-detail .edu",
+                                ".job-info span", "[class*='degree']",
+                            ])
+                            detail_link = ""
+                            link_el = card.query_selector(
+                                "a.job-card-left, a[href*='job_detail'], a[href*='/job/'], a"
+                            )
+                            if link_el:
+                                href = link_el.get_attribute("href") or ""
+                                if href and not href.startswith("http"):
+                                    detail_link = "https://www.zhipin.com" + href
+                                else:
+                                    detail_link = href
+
+                            if not job_title or not company_name:
+                                continue
+
+                            enterprise_type = _determine_enterprise_type(company_name, "BOSS直聘")
+                            job_obj = {
+                                "job_title": job_title, "company": company_name,
+                                "enterprise_type": enterprise_type, "detail_link": detail_link,
+                                "salary_range": salary_range, "responsibilities": "详见岗位详情页",
+                                "requirements": f"学历要求：{edu}" if edu else "详见岗位详情页",
+                                "benefits": "详见岗位详情页",
+                                "development": _generate_development(enterprise_type, "BOSS直聘"),
+                                "work_location": work_location or "全国",
+                                "source": "BOSS直聘（真实数据）", "search_keyword": keyword,
+                                "_raw_contents": "", "_raw_edu": edu, "_raw_exp": "",
+                            }
+                            results.append(job_obj)
+                        except Exception as e2:
+                            print(f"  [WARNING] 逐个解析也失败: {e2}")
+                            continue
 
             browser.close()
     except Exception as e:
@@ -1952,8 +2080,219 @@ def crawl_local_soe(keyword, city=None):
 
 
 # ============================================================
+# ============================================================
+# AI 提取：从微信公众号文章提取结构化岗位（火山方舟 DeepSeek V4）
+# ============================================================
+
+_ARK_API_KEY = os.environ.get("ARK_API_KEY", "")
+_ARK_ENDPOINT = os.environ.get("ARK_ENDPOINT", "")
+
+
+def _extract_jobs_with_ai(article_text, user_field, user_city):
+    """使用火山方舟 DeepSeek V4 Pro 从公众号文章正文提取岗位。"""
+    if not _ARK_API_KEY or not _ARK_ENDPOINT:
+        return []
+
+    text_snippet = article_text[:3000]
+
+    prompt = f"""你是招聘信息提取助手。从以下公众号文章提取所有招聘岗位。
+
+要求:
+1. 只提取与「{user_field}」相关的岗位
+2. 优先提取「{user_city}」的岗位
+3. 每个岗位输出: {{"job_title":"","company":"","salary":"","location":""}}
+4. 无相关岗位返回 []
+
+只返回 JSON 数组:"""
+
+    try:
+        resp = requests.post(
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {_ARK_API_KEY}"},
+            json={"model": _ARK_ENDPOINT, "messages": [
+                {"role": "user", "content": prompt + "\n" + text_snippet}
+            ], "max_tokens": 1500, "temperature": 0.1},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return []
+        content = resp.json()["choices"][0]["message"]["content"]
+        match = re.search(r"\[.*\]", content, re.DOTALL)
+        return json.loads(match.group()) if match else []
+    except Exception:
+        return []
+
+
 # 爬虫：微信公众号招聘文章（通过搜狗微信搜索）
 # ============================================================
+
+# 时效性阈值：只取发布在 960 小时（40天）内的文章
+_WECHAT_MAX_HOURS = 960
+
+# 已验证的公众号白名单缓存（蓝V认证），避免对同一账号重复检测
+_VERIFIED_ACCOUNTS_CACHE = set()
+_UNVERIFIED_ACCOUNTS_CACHE = set()
+
+
+def _parse_sogou_publish_time(time_text):
+    """解析搜狗微信搜索结果的发布时间，返回 datetime 或 None。
+
+    搜狗页面上的时间格式：
+    - "7月15日" → 今年7月15日
+    - "3天前" → 3天前
+    - "5小时前" → 5小时前
+    - "30分钟前" → 30分钟前
+    - "昨天" → 昨天
+    """
+    if not time_text:
+        return None
+    text = time_text.strip()
+
+    now = datetime.now()
+    try:
+        # "X天前"
+        m = re.match(r"(\d+)\s*天前", text)
+        if m:
+            days = int(m.group(1))
+            from datetime import timedelta
+            return now - timedelta(days=days)
+
+        # "X小时前"
+        m = re.match(r"(\d+)\s*小时前", text)
+        if m:
+            hours = int(m.group(1))
+            from datetime import timedelta
+            return now - timedelta(hours=hours)
+
+        # "X分钟前"
+        m = re.match(r"(\d+)\s*分钟前", text)
+        if m:
+            minutes = int(m.group(1))
+            from datetime import timedelta
+            return now - timedelta(minutes=minutes)
+
+        # "昨天"
+        if "昨天" in text:
+            from datetime import timedelta
+            return now - timedelta(days=1)
+
+        # "X月X日"
+        m = re.match(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+        if m:
+            month, day = int(m.group(1)), int(m.group(2))
+            year = now.year
+            # 如果月份比当前月份大，说明是去年的
+            if month > now.month:
+                year -= 1
+            return datetime(year, month, day)
+
+        # "X年X月X日"
+        m = re.match(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+        if m:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except Exception:
+        pass
+
+    return None
+
+
+def _is_within_time_window(publish_time, max_hours=_WECHAT_MAX_HOURS):
+    """判断发布时间是否在时间窗口内。"""
+    if publish_time is None:
+        return False  # 无法解析时间的，保守跳过
+    from datetime import timedelta
+    cutoff = datetime.now() - timedelta(hours=max_hours)
+    return publish_time >= cutoff
+
+
+def _check_wechat_account_verified(page, article_url):
+    """在 Playwright 已打开的公众号文章页上检查账号是否为蓝V认证。
+
+    策略：三层过滤
+    1. 页面DOM检测：查找认证标识元素
+    2. 账号名称白名单：匹配已知央企/国企/政府机构名称
+    3. 账号名称黑名单：排除中介/猎头/招聘资讯类订阅号
+
+    返回 (verified: bool, account_name: str, account_type: str)
+    """
+    account_name = ""
+    account_type = "unknown"
+
+    try:
+        # 从页面提取公众号昵称
+        nickname_el = page.query_selector(".rich_media_meta_nickname, #js_name, .wx_follow_nickname")
+        if nickname_el:
+            account_name = nickname_el.inner_text().strip()
+
+        # === 第1层：页面DOM认证标识检测 ===
+        verify_selectors = [
+            "#js_profile_qrcode .profile_verify_icon",
+            ".rich_media_meta_nickname .verify_icon",
+            "#js_verify",
+            "[class*='wx_verify']",
+        ]
+        for sel in verify_selectors:
+            try:
+                el = page.query_selector(sel)
+                if el:
+                    title_attr = el.get_attribute("title") or ""
+                    title_lower = title_attr.lower()
+                    if any(kw in title_lower for kw in ["政府", "事业单位", "机关"]):
+                        return True, account_name, "government"
+                    if any(kw in title_lower for kw in ["企业", "公司", "集团"]):
+                        return True, account_name, "enterprise"
+                    if any(kw in title_lower for kw in ["媒体", "新闻"]):
+                        return True, account_name, "media"
+                    # 有认证标识但无法归类，视为企业认证
+                    return True, account_name, "enterprise"
+            except Exception:
+                continue
+
+        # === 第2层：账号名称白名单（已知央企/国企/政府） ===
+        known_official = (
+            _ALL_KNOWN_OFFICIAL_ACCOUNTS()  # 动态构建
+        )
+        if account_name:
+            for official_name in known_official:
+                if official_name in account_name:
+                    return True, account_name, "enterprise"
+
+        # === 第3层：黑名单模式（中介/猎头/招聘资讯类订阅号） ===
+        _INTERMEDIARY_PATTERNS = re.compile(
+            r"招聘|人才网|人才市场|猎头|人力|HR|兼职|临时工|"
+            r"信息平台|资讯|服务网|工作室|Studio|"
+            r"每日|大全|汇总|推送|速递|快讯|"
+            r"中公|华图|粉笔|导氮|优聘|灵动|智联|前程|猎聘|"
+            r"小景|小助手",
+        )
+        if account_name and _INTERMEDIARY_PATTERNS.search(account_name):
+            return False, account_name, "intermediary"
+
+        # 账号名太短或无法判断 → 保守拒绝
+        if account_name and len(account_name) < 4:
+            return False, account_name, "suspicious_short"
+
+        return False, account_name, "unverified"
+    except Exception:
+        return False, account_name, "unknown"
+
+
+def _ALL_KNOWN_OFFICIAL_ACCOUNTS():
+    """构建已知官方账号名称列表（央企+地方国企+政府机构简称）。"""
+    names = set()
+    for soe in NATIONAL_SOE_SOURCES:
+        names.add(soe["name"])
+    for city_soes in LOCAL_SOE_MAP.values():
+        for s in city_soes:
+            names.add(s["name"])
+    # 常见政府/事业单位关键词
+    names.update([
+        "中国", "国家", "中央", "国务院", "人力资源社会保障",
+        "湖南省", "长沙市", "长沙", "湖南",
+        "清华大学", "北京大学", "浙江大学",
+    ])
+    return sorted(names, key=len, reverse=True)  # 长名称优先匹配
+
 
 def crawl_wechat_sogou(keyword, city=None):
     """
@@ -1971,33 +2310,35 @@ def crawl_wechat_sogou(keyword, city=None):
     city_key = (city or "").replace("市", "").strip()
     local_soenames = [s["name"] for s in LOCAL_SOE_MAP.get(city_key, [])]
 
-    # 构建搜索词组合 —— 全面覆盖
+    # 构建搜索词组合 —— 优先搜专业+城市，再搜央企通用
     search_terms = []
 
-    # 1. 每个央企 + 城市组合
-    for soe in NATIONAL_SOE_SOURCES:
-        if city:
-            search_terms.append(f"{soe['name']} {city} 招聘")
-        search_terms.append(f"{soe['name']} 招聘")
+    # ★ 1. 关键词 + 城市组合（最高优先，最精准）
+    if keyword and city:
+        search_terms.append(f"{city} {keyword} 招聘")
+        search_terms.append(f"{keyword} {city} 招聘")
+        search_terms.append(f"{city} {keyword}")
+        search_terms.append(f"{keyword} 招聘 {city}")
+    elif keyword:
+        search_terms.append(f"{keyword} 招聘")
 
-    # 2. 每个地方国企
-    for name in local_soenames:
-        search_terms.append(f"{name} 招聘")
-        if city:
-            search_terms.append(f"{name} {city}")
-
-    # 3. 城市 + 国企通用搜索
+    # 2. 城市 + 国企通用搜索
     if city:
         search_terms.append(f"{city} 国企 招聘")
         search_terms.append(f"{city} 央企 招聘")
         search_terms.append(f"{city} 事业单位 招聘")
 
-    # 4. 关键词 + 城市组合
-    if keyword and city:
-        search_terms.append(f"{keyword} {city} 招聘")
-        search_terms.append(f"{city} {keyword} 招聘")
-    elif keyword:
-        search_terms.append(f"{keyword} 招聘")
+    # 3. 每个央企 + 城市组合
+    for soe in NATIONAL_SOE_SOURCES:
+        if city:
+            search_terms.append(f"{soe['name']} {city} 招聘")
+        search_terms.append(f"{soe['name']} 招聘")
+
+    # 4. 每个地方国企
+    for name in local_soenames:
+        search_terms.append(f"{name} 招聘")
+        if city:
+            search_terms.append(f"{name} {city}")
 
     # 去重并限制（最多30条搜索，足够多）
     search_terms = list(dict.fromkeys(search_terms))[:30]
@@ -2039,6 +2380,14 @@ def crawl_wechat_sogou(keyword, city=None):
                 if found >= 5:
                     break
                 try:
+                    # 记录文章时间文本（搜狗 HTML 中时间不易可靠解析，
+                    # 真正的时效性过滤在 Playwright 获取文章页面时执行）
+                    time_el = article.select_one(
+                        ".s3, .s4, [class*='p-time'], [class*='date'], "
+                        "span:last-of-type"
+                    )
+                    publish_time_str = time_el.get_text(strip=True) if time_el else ""
+
                     title_el = article.select_one(
                         "h3 a, h4 a, .tit a, [class*='title'] a, a[target='_blank']"
                     )
@@ -2104,6 +2453,9 @@ def crawl_wechat_sogou(keyword, city=None):
                         "_raw_contents": summary,
                         "_raw_edu": "",
                         "_raw_exp": "",
+                        # 用于后续资质校验和时效过滤
+                        "_publish_time_str": publish_time_str,
+                        "_account_name": account_name,
                     }
                     results.append(job_obj)
                     found += 1
@@ -2118,8 +2470,201 @@ def crawl_wechat_sogou(keyword, city=None):
 
         _random_delay()
 
+    # 尝试用 AI 从文章正文中提取结构化岗位信息
+    if _ARK_API_KEY and _ARK_ENDPOINT and results:
+        ai_jobs = _extract_from_wechat_articles_with_ai(results, keyword, city)
+        if ai_jobs:
+            print(f"[微信公众号] ★ AI 从文章正文提取到 {len(ai_jobs)} 个结构化岗位")
+            # AI 提取的岗位替换原有浅层结果（标题摘要太粗糙）
+            results = ai_jobs
+        else:
+            print(f"[微信公众号] ★ AI 未提取到结构化岗位，保留原始结果")
+
     print(f"[微信公众号] ★ 总计 {len(results)} 篇招聘文章（来自 {len(search_terms)} 个搜索词）")
     return results
+
+
+def _extract_from_wechat_articles_with_ai(articles, keyword, city):
+    """用 Playwright 获取文章正文 + AI 提取结构化岗位。"""
+    ai_jobs = []
+    seen = set()
+
+    # Step 1: 用 Playwright 批量获取文章正文和真实链接
+    article_texts = _fetch_wechat_articles_with_playwright(articles[:10])
+
+    # Step 2: 分批调用 AI
+    # 每批 3 篇，避免文本过长导致 AI 超时
+    for i in range(0, len(article_texts), 3):
+        chunk = article_texts[i:i+3]
+        combined = "\n---\n".join(t["text"] for t in chunk)
+
+        extracted = _extract_jobs_with_ai(combined, keyword, city)
+        for ej in extracted:
+            job_title = ej.get("job_title", "")
+            company = ej.get("company", "国企")
+            salary = ej.get("salary", "详见公告")
+            location = ej.get("location", city or "全国")
+
+            if not job_title or len(job_title) < 3:
+                continue
+
+            # 尝试匹配到原始文章的真实链接
+            detail_link = ""
+            for at in chunk:
+                if job_title in at["text"] or company in at["text"]:
+                    detail_link = at.get("wechat_url", "")
+                    break
+
+            # 如果没有真实链接，生成搜索链接
+            if not detail_link:
+                detail_link = _build_search_link(job_title, company, city)
+
+            ai_jobs.append({
+                "job_title": job_title[:80],
+                "company": company,
+                "enterprise_type": "国企",
+                "detail_link": detail_link,
+                "salary_range": salary,
+                "responsibilities": "详见岗位详情页",
+                "requirements": "详见岗位详情页",
+                "benefits": "国企福利待遇（五险二金/年终奖/带薪年假）",
+                "development": "国企平台稳定",
+                "work_location": location,
+                "source": "微信公众号-AI提取（真实数据）",
+                "search_keyword": keyword,
+                "_raw_contents": combined[:500],
+                "_raw_edu": "",
+                "_raw_exp": "",
+            })
+
+    return ai_jobs
+
+
+def _fetch_wechat_articles_with_playwright(articles):
+    """用 Playwright 批量打开搜狗微信链接，获取文章正文和真实 mp.weixin.qq.com 链接。"""
+    results = []
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        # 降级：只用标题和摘要
+        for a in articles:
+            title = a.get("job_title", "")
+            summary = a.get("_raw_contents", "")
+            if title and len(title) > 2:
+                results.append({"text": f"标题:{title}\n摘要:{summary}", "wechat_url": ""})
+        return results
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox",
+                      "--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=COMMON_UA, viewport={"width": 1920, "height": 1080}, locale="zh-CN",
+            )
+            page = context.new_page()
+            page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            )
+
+            for article in articles:
+                url = article.get("detail_link", "")
+                title = article.get("job_title", "")
+                summary = article.get("_raw_contents", "")
+                account_name = article.get("_account_name", "")
+
+                # ★ 账号白名单快速通道：已被验证过的账号直接通过
+                if account_name and account_name in _VERIFIED_ACCOUNTS_CACHE:
+                    pass  # 已验证，直接走后续流程
+                elif account_name and account_name in _UNVERIFIED_ACCOUNTS_CACHE:
+                    print(f"    [资质过滤] 跳过未认证账号: {account_name}")
+                    continue
+
+                if not url or "sogou.com" not in url:
+                    results.append({"text": f"标题:{title}\n摘要:{summary}", "wechat_url": url if url else ""})
+                    continue
+
+                try:
+                    # ★ 关键技巧：每篇文章先回搜狗搜索页建立 cookie 和 referer，
+                    # 让搜狗以为是真人浏览行为，再跳转文章链接就不会触发反爬
+                    page.goto("https://weixin.sogou.com/weixin?type=2", wait_until="domcontentloaded", timeout=10000)
+                    page.wait_for_timeout(500)
+                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    page.wait_for_timeout(3000)
+                    final_url = page.url
+
+                    if "mp.weixin.qq.com" in final_url:
+                        # 先获取页面HTML，用于时间 + 资质双重校验
+                        html = page.content()
+                        from bs4 import BeautifulSoup as _BS
+                        soup = _BS(html, "lxml")
+
+                        # ★ 时效性校验：从公众号文章页提取发布时间
+                        publish_time_selectors = [
+                            "#publish_time", ".rich_media_meta_text",
+                            "#meta_content time", "[class*='publish']",
+                            "time", "em#publish_time",
+                        ]
+                        article_publish_dt = None
+                        for pts in publish_time_selectors:
+                            pt_el = soup.select_one(pts)
+                            if pt_el:
+                                pt_text = pt_el.get_text(strip=True) or pt_el.get("datetime", "")
+                                article_publish_dt = _parse_sogou_publish_time(pt_text)
+                                if article_publish_dt:
+                                    break
+                        if not _is_within_time_window(article_publish_dt):
+                            ts = article_publish_dt.strftime("%Y-%m-%d") if article_publish_dt else "未知"
+                            print(f"    [时效过滤] 跳过: {title[:25]} (发布于 {ts}, 超出{_WECHAT_MAX_HOURS}h)")
+                            continue
+
+                        # ★ 账号资质校验：检查是否为蓝V认证官方公众号
+                        if account_name and account_name not in _VERIFIED_ACCOUNTS_CACHE:
+                            verified, _, acct_type = _check_wechat_account_verified(page, final_url)
+                            if verified:
+                                _VERIFIED_ACCOUNTS_CACHE.add(account_name)
+                                print(f"    [资质校验] ✅ 认证账号: {account_name} ({acct_type})")
+                            else:
+                                _UNVERIFIED_ACCOUNTS_CACHE.add(account_name)
+                                print(f"    [资质过滤] ❌ 未认证账号: {account_name}, 跳过")
+                                continue
+
+                        body = soup.find("div", id="js_content")
+                        text = body.get_text(separator="\n", strip=True)[:2000] if body else title + "\n" + summary
+                        results.append({"text": text, "wechat_url": final_url})
+                        print(f"    [微信正文] ✅ {title[:25]}")
+                    elif "antispider" in final_url:
+                        # 被拦，降级为标题摘要
+                        results.append({"text": f"标题:{title}\n摘要:{summary}", "wechat_url": ""})
+                        print(f"    [微信正文] ⚠️ 反爬: {title[:20]}")
+                    else:
+                        results.append({"text": f"标题:{title}\n摘要:{summary}", "wechat_url": ""})
+                        print(f"    [微信正文] ⚠️ 未到公众号: {title[:20]}")
+
+                except Exception as e:
+                    print(f"    [微信正文] ❌ {title[:20]}: {e}")
+                    results.append({"text": f"标题:{title}\n摘要:{summary}", "wechat_url": ""})
+
+            browser.close()
+
+    except Exception as e:
+        print(f"    [微信正文] Playwright 整体失败: {e}")
+        for a in articles:
+            title = a.get("job_title", "")
+            summary = a.get("_raw_contents", "")
+            if title and len(title) > 2:
+                results.append({"text": f"标题:{title}\n摘要:{summary}", "wechat_url": ""})
+
+    return results
+
+
+def _build_search_link(job_title, company, city):
+    """为没有详情链接的岗位生成搜索链接。"""
+    query = f"{company} {job_title} {city or ''}".strip()
+    encoded = urllib.parse.quote(query)
+    return f"https://www.iguopin.com/search?keyword={encoded}"
 
 
 # ============================================================
