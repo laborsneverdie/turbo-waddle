@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabase } from "@/lib/db";
+import { spawn } from "child_process";
+import path from "path";
 
 export async function POST(req: NextRequest) {
   try {
@@ -30,15 +32,13 @@ export async function POST(req: NextRequest) {
       throw new Error(error?.message || "插入用户资料失败");
     }
 
-    // 提交成功后，异步触发 GitHub Actions（10分钟内完成首次推荐）
-    triggerWorkflow(data.id).catch((e) => {
-      console.error("[GitHub Actions] 触发失败:", e);
-    });
+    // 提交成功后，异步触发本地 Python 爬虫（内网部署）
+    triggerCrawl(data.id);
 
     return NextResponse.json(
       {
         userId: data.id,
-        message: "提交成功，岗位推荐将在10分钟内生成并发送至您的邮箱",
+        message: "提交成功！爬虫已开始工作，岗位推荐将在几分钟内生成并发送至您的微信/邮箱",
       },
       { status: 201 }
     );
@@ -49,36 +49,24 @@ export async function POST(req: NextRequest) {
   }
 }
 
-/**
- * 触发 GitHub Actions workflow，让推荐脚本在10分钟内运行
- * 需要 GITHUB_TOKEN 和 GITHUB_REPO 环境变量
- */
-async function triggerWorkflow(userId: number) {
-  const token = process.env.GITHUB_TOKEN;
-  const repo = process.env.GITHUB_REPO; // 格式: owner/repo
+/** 触发本地 Python 爬虫脚本（异步，不阻塞请求） */
+function triggerCrawl(userId: number) {
+  const scriptPath = path.join(process.cwd(), "scripts", "recommend_jobs.py");
 
-  if (!token || !repo) {
-    console.log("[GitHub Actions] 未配置 GITHUB_TOKEN 或 GITHUB_REPO，跳过自动触发");
-    return;
-  }
+  const child = spawn("python", [scriptPath], {
+    detached: true,
+    stdio: "ignore",
+    cwd: process.cwd(),
+    env: { ...process.env },
+  });
 
-  const resp = await fetch(
-    `https://api.github.com/repos/${repo}/actions/workflows/job-recommend.yml/dispatches`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ ref: "main" }),
-    }
-  );
+  child.on("error", (err) => {
+    console.error(`[爬虫] 用户${userId} 触发失败:`, err.message);
+  });
 
-  if (resp.status === 204) {
-    console.log(`[GitHub Actions] 触发成功，用户 ${userId} 的推荐将在10分钟内生成`);
-  } else {
-    const text = await resp.text();
-    console.error(`[GitHub Actions] 触发失败 HTTP ${resp.status}: ${text}`);
-  }
+  child.on("spawn", () => {
+    console.log(`[爬虫] 用户${userId}提交后已触发，PID: ${child.pid}`);
+  });
+
+  child.unref();
 }
