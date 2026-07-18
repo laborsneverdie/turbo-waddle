@@ -2206,15 +2206,128 @@ def _is_within_time_window(publish_time, max_hours=_WECHAT_MAX_HOURS):
 
 
 def _check_wechat_account_verified(page, article_url):
-    """在 Playwright 已打开的公众号文章页上检查账号是否为蓝V认证。
+    """基于关键词分类法判定公众号是否为官方认证账号（官号）。
 
-    策略：三层过滤
-    1. 页面DOM检测：查找认证标识元素
-    2. 账号名称白名单：匹配已知央企/国企/政府机构名称
-    3. 账号名称黑名单：排除中介/猎头/招聘资讯类订阅号
+    策略（按优先级）：
+    1. 页面DOM认证标识检测（蓝V图标）
+    2. 关键词白名单匹配 → 判定为官号
+    3. 关键词黑名单匹配 → 判定为中介号
+    4. 综合判断 → 未知则保守拒绝
 
     返回 (verified: bool, account_name: str, account_type: str)
+    account_type: "government"|"enterprise"|"media"|"intermediary"|"unverified"
     """
+
+    # ========== 白名单关键词（匹配到任一即判定为官号） ==========
+    _SOE_PREFIXES = ["中国", "中华", "国家", "中央"]
+    _SOE_SUFFIXES = ["集团有限公司", "控股集团", "股份有限公司", "总公司"]
+    _SOE_INDUSTRY = ["石油", "电网", "铁路", "建筑", "烟草", "航天", "兵器", "船舶", "电力", "电信", "国资"]
+
+    _LOCAL_PREFIXES = ["湖南", "长沙", "湘江", "星城", "湘"]
+    _LOCAL_SUFFIXES = ["建设集团", "投资集团", "城发", "城投", "国资", "控股", "发展集团"]
+
+    _GOVERNMENT_KW = ["国有资产监督管理委员会", "人民政府", "人社局", "人力资源社会保障"]
+
+    # 高可信官方关键词（直接判定为官号，不依赖前缀/后缀组合）
+    _HARD_OFFICIAL_KW = [
+        "南方电网", "国家电网", "国家电投", "中国石油", "中国石化", "中国海油",
+        "中国移动", "中国联通", "中国电信", "中国建筑", "中国中铁",
+        "中国铁建", "中粮集团", "华润集团", "招商局", "中国航天",
+        "中国船舶", "中国兵器", "中国航天科工", "中国电子",
+        "中金岭南", "中联重科", "长沙银行", "湖南银行",
+        "北京大学", "清华大学",
+    ]
+
+    # ========== 黑名单关键词 ==========
+    _HARD_INTERMEDIARY_KW = [
+        # 教育/培训类
+        "教育", "教育科技", "人力资源", "劳务派遣", "人才服务", "求职咨询",
+        # 已知公考培训机构
+        "中公", "华图", "粉笔", "腰果", "公考",
+        # 招聘平台类
+        "招聘网", "人才网",
+    ]
+
+    # 需结合其他关键词综合判断（单独命中不触发黑名单）
+    _SOFT_INTERMEDIARY_KW = [
+        "文化传媒", "信息科技", "网络科技",
+    ]
+
+    def _count_blacklist_hits(name):
+        """统计账号名命中黑名单关键词的次数。"""
+        count = 0
+        for kw in _HARD_INTERMEDIARY_KW:
+            if kw in name:
+                count += 1
+        for kw in _SOFT_INTERMEDIARY_KW:
+            if kw in name:
+                count += 1
+        return count
+
+    def _has_hard_blacklist(name):
+        """检查是否命中硬黑名单（无需组合判断即可判定为中介）。"""
+        for kw in _HARD_INTERMEDIARY_KW:
+            if kw in name:
+                return True
+        return False
+
+    def _has_soft_blacklist(name):
+        """检查是否命中软黑名单。"""
+        for kw in _SOFT_INTERMEDIARY_KW:
+            if kw in name:
+                return True
+        return False
+
+    def _is_official_by_keywords(name):
+        """基于关键词判断是否为官方账号。"""
+        if not name:
+            return False, "unknown"
+
+        # === 高可信官方关键词（直接匹配） ===
+        for kw in _HARD_OFFICIAL_KW:
+            if kw in name:
+                return True, "enterprise"
+
+        # === 央企命名模式：前缀 + (行业词 或 后缀) ===
+        has_soe_prefix = any(name.startswith(p) for p in _SOE_PREFIXES)
+        has_industry = any(kw in name for kw in _SOE_INDUSTRY)
+        has_soe_suffix = any(name.endswith(s) for s in _SOE_SUFFIXES)
+        if has_soe_prefix and (has_industry or has_soe_suffix):
+            return True, "enterprise"
+
+        # === 地方国企模式：地方前缀 + 国企后缀 ===
+        has_local_prefix = any(kw in name for kw in _LOCAL_PREFIXES)
+        has_local_suffix = any(kw in name for kw in _LOCAL_SUFFIXES)
+        if has_local_prefix and has_local_suffix:
+            return True, "enterprise"
+
+        # === 政府/事业单位 ===
+        for kw in _GOVERNMENT_KW:
+            if kw in name:
+                return True, "government"
+
+        return False, "unknown"
+
+    def _is_intermediary_by_keywords(name):
+        """基于关键词判断是否为中介/培训类账号。"""
+        if not name:
+            return False, "unknown"
+
+        # 硬黑名单：直接判定为中介
+        if _has_hard_blacklist(name):
+            return True, "intermediary"
+
+        # 软黑名单：需要至少命中一个其他黑名单关键词
+        if _has_soft_blacklist(name):
+            hit_count = _count_blacklist_hits(name)
+            if hit_count >= 2:
+                # 软黑名单 + 任一其他黑名单关键词 = 中介
+                return True, "intermediary"
+            # 仅命中软黑名单，不判定
+
+        return False, "unknown"
+
+    # ====== 主逻辑 ======
     account_name = ""
     account_type = "unknown"
 
@@ -2224,7 +2337,7 @@ def _check_wechat_account_verified(page, article_url):
         if nickname_el:
             account_name = nickname_el.inner_text().strip()
 
-        # === 第1层：页面DOM认证标识检测 ===
+        # === 第1层：页面DOM认证标识检测（最高优先） ===
         verify_selectors = [
             "#js_profile_qrcode .profile_verify_icon",
             ".rich_media_meta_nickname .verify_icon",
@@ -2235,7 +2348,7 @@ def _check_wechat_account_verified(page, article_url):
             try:
                 el = page.query_selector(sel)
                 if el:
-                    title_attr = el.get_attribute("title") or ""
+                    title_attr = el.get_attribute("title") or el.get_attribute("aria-label") or ""
                     title_lower = title_attr.lower()
                     if any(kw in title_lower for kw in ["政府", "事业单位", "机关"]):
                         return True, account_name, "government"
@@ -2243,55 +2356,37 @@ def _check_wechat_account_verified(page, article_url):
                         return True, account_name, "enterprise"
                     if any(kw in title_lower for kw in ["媒体", "新闻"]):
                         return True, account_name, "media"
-                    # 有认证标识但无法归类，视为企业认证
-                    return True, account_name, "enterprise"
+                    # 有认证标识但无法确定类型 → 仍视为企业认证
+                    if title_attr:
+                        return True, account_name, "enterprise"
+                    # title 为空说明是误匹配，继续尝试下一个选择器
             except Exception:
                 continue
 
-        # === 第2层：账号名称白名单（已知央企/国企/政府） ===
-        known_official = (
-            _ALL_KNOWN_OFFICIAL_ACCOUNTS()  # 动态构建
-        )
-        if account_name:
-            for official_name in known_official:
-                if official_name in account_name:
-                    return True, account_name, "enterprise"
+        # === 第2层：关键词白名单匹配 ===
+        is_official, official_type = _is_official_by_keywords(account_name)
+        if is_official:
+            return True, account_name, official_type
 
-        # === 第3层：黑名单模式（中介/猎头/招聘资讯类订阅号） ===
-        _INTERMEDIARY_PATTERNS = re.compile(
-            r"招聘|人才网|人才市场|猎头|人力|HR|兼职|临时工|"
-            r"信息平台|资讯|服务网|工作室|Studio|"
-            r"每日|大全|汇总|推送|速递|快讯|"
-            r"中公|华图|粉笔|导氮|优聘|灵动|智联|前程|猎聘|"
-            r"小景|小助手",
-        )
-        if account_name and _INTERMEDIARY_PATTERNS.search(account_name):
-            return False, account_name, "intermediary"
+        # === 第3层：关键词黑名单匹配 ===
+        is_intermediary, intermediary_type = _is_intermediary_by_keywords(account_name)
+        if is_intermediary:
+            return False, account_name, intermediary_type
 
-        # 账号名太短或无法判断 → 保守拒绝
-        if account_name and len(account_name) < 4:
+        # === 第4层：保守策略 ===
+        # 无法判断 → 保守拒绝（避免中介号漏网）
+        if account_name and len(account_name) >= 4:
+            # 有一定长度但无法识别 → 默认为未认证
+            return False, account_name, "unverified"
+        elif account_name:
+            # 短名称、无法判断 → 拒绝
             return False, account_name, "suspicious_short"
 
-        return False, account_name, "unverified"
+        return False, account_name, "unknown"
     except Exception:
         return False, account_name, "unknown"
-
-
-def _ALL_KNOWN_OFFICIAL_ACCOUNTS():
-    """构建已知官方账号名称列表（央企+地方国企+政府机构简称）。"""
-    names = set()
-    for soe in NATIONAL_SOE_SOURCES:
-        names.add(soe["name"])
-    for city_soes in LOCAL_SOE_MAP.values():
-        for s in city_soes:
-            names.add(s["name"])
-    # 常见政府/事业单位关键词
-    names.update([
-        "中国", "国家", "中央", "国务院", "人力资源社会保障",
-        "湖南省", "长沙市", "长沙", "湖南",
-        "清华大学", "北京大学", "浙江大学",
-    ])
-    return sorted(names, key=len, reverse=True)  # 长名称优先匹配
+    except Exception:
+        return False, account_name, "unknown"
 
 
 def crawl_wechat_sogou(keyword, city=None):
