@@ -61,13 +61,16 @@ if not SUPABASE_KEY:
     print("[错误] 缺少环境变量 SUPABASE_KEY，请在 GitHub Secrets 中添加")
     sys.exit(1)
 
-# Supabase REST API 请求头（使用 service_role key 绕过 RLS）
+# Supabase REST API 请求头（兼容新旧版 API keys）
+# 新版 secret key (sb_secret_...) 只需 apikey header，旧版 JWT key 需要 Authorization
 HEADERS = {
     "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json",
     "Prefer": "return=representation",
 }
+if SUPABASE_KEY.startswith("eyJ"):
+    # 旧版 JWT 格式的 key，需要 Authorization
+    HEADERS["Authorization"] = f"Bearer {SUPABASE_KEY}"
 
 
 # ============ 读取用户 ============
@@ -1249,9 +1252,10 @@ def upload_to_storage(filepath: str, content_type: str = "application/vnd.openxm
             file_data = f.read()
         upload_headers = {
             "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
             "Content-Type": content_type,
         }
+        if SUPABASE_KEY.startswith("eyJ"):
+            upload_headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
         resp = requests.post(
             f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{filename}",
             headers=upload_headers,
