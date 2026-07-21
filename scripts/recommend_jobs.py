@@ -84,7 +84,7 @@ def save_recommendations(user_id: int, jobs: list[dict]):
     if resp_del.status_code not in (200, 204):
         print(f"  [Supabase] 删除旧推荐失败: {resp_del.status_code} {resp_del.text[:200]}")
     
-    saved = []
+    saved_count = 0
     for idx, j in enumerate(jobs):
         row = {
             "user_id": user_id,
@@ -93,15 +93,6 @@ def save_recommendations(user_id: int, jobs: list[dict]):
             "enterprise_type": j.get("enterprise_type", "")[:50],
             "match_score": j.get("match_score", 0),
             "detail_link": j.get("detail_link", "")[:500],
-            "salary_range": j.get("salary_range", "")[:100],
-            "responsibilities": (j.get("responsibilities", "") or "")[:2000],
-            "requirements": (j.get("requirements", "") or "")[:2000],
-            "benefits": (j.get("benefits", "") or "")[:500],
-            "development": (j.get("development", "") or "")[:500],
-            "work_location": j.get("work_location", "")[:100],
-            "source": j.get("source", "")[:200],
-            "search_links": json.dumps(j.get("search_links", []), ensure_ascii=False)[:4000],
-            "search_keyword": j.get("search_keyword", "")[:200],
         }
         try:
             resp = requests.post(
@@ -109,18 +100,19 @@ def save_recommendations(user_id: int, jobs: list[dict]):
                 headers=_save_headers, json=row, timeout=30,
             )
             if resp.status_code in (200, 201, 204):
-                saved.append(row)
+                saved_count += 1
             else:
                 if idx < 2:  # 只打印前2条的详细错误
                     print(f"  [Supabase] 写入岗位{idx+1}失败: {resp.status_code} {resp.text[:300]}")
         except Exception as e:
             if idx < 2:
                 print(f"  [Supabase] 写入岗位{idx+1}异常: {e}")
-    if saved:
-        print(f"  [Supabase] 成功写入 {len(saved)}/{len(jobs)} 条岗位")
+    if saved_count:
+        print(f"  [Supabase] 成功写入 {saved_count}/{len(jobs)} 条岗位")
     else:
-        print(f"  [Supabase] ⚠️ 全部 {len(jobs)} 条写入失败！检查表结构/RLS/字段类型")
-    return saved
+        if len(jobs) > 0:
+            print(f"  [Supabase] ⚠️ 全部 {len(jobs)} 条写入失败！检查表结构/RLS/字段类型")
+    return jobs  # 返回原始完整数据供 H5/docx 使用
 
 # 每个网站爬取超时
 SITE_TIMEOUT = 20
@@ -3963,22 +3955,20 @@ def main():
         for u in batch:
             try:
                 jobs = generate_recommendations(u)
-                saved = save_recommendations(u["id"], jobs)
+                save_recommendations(u["id"], jobs)
                 # 先生成 H5 页面并上传，获取可直接跳转的链接
-                h5_path = generate_h5_report(u, saved)
+                h5_path = generate_h5_report(u, jobs)
                 h5_url = upload_to_storage(h5_path, content_type="text/html; charset=utf-8")
                 # 将每个岗位的详情链接指向 H5 页面
                 if h5_url:
-                    for j in saved:
+                    for j in jobs:
                         j["detail_link"] = h5_url
-                # 生成 docx 报告（详情链接已指向 H5 页面）
-                report_path = generate_docx_report(u, saved)
+                # 生成 docx 报告
+                report_path = generate_docx_report(u, jobs)
                 generated_reports.append(report_path)
-                # 推送微信/邮箱，H5 链接可直接在手机浏览器跳转
-                push_wechat(u, saved, h5_url)
-                # 邮件推送 H5 链接至用户邮箱
-                send_email(u, h5_url, saved)
-                print(f"[主流程] 用户 {u['id']} 推荐了 {len(saved)} 个岗位，H5+docx+邮件已推送")
+                push_wechat(u, jobs, h5_url)
+                send_email(u, h5_url, jobs)
+                print(f"[主流程] 用户 {u['id']} 推荐了 {len(jobs)} 个岗位，H5+docx+邮件已推送")
                 success_count += 1
             except Exception as e:
                 print(f"[主流程] 用户 {u.get('id')} 处理失败: {e}")
