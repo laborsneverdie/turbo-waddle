@@ -3916,7 +3916,21 @@ def push_wechat(user: dict, jobs: list[dict], download_url: str | None = None):
 
 
 # ============ 主流程 ============
+def _is_garbled(text):
+    """检测文本是否乱码（含不可打印字符或过量问号）"""
+    if not text:
+        return True
+    # 全是问号或替换字符
+    if text.strip().replace("?", "").replace("�", "").replace(" ", "").replace("\ufffd", "").strip() == "":
+        return True
+    # 问号占比超过30%
+    q_count = text.count("?") + text.count("�") + text.count("\ufffd")
+    if q_count > len(text) * 0.3:
+        return True
+    return False
+
 def main():
+    MAX_USERS = 12  # 每批最多处理12个用户（约60分钟）
     try:
         users = fetch_users()
         print(f"[主流程] 共读取到 {len(users)} 个用户")
@@ -3925,11 +3939,28 @@ def main():
             print("[主流程] 没有用户数据，任务结束")
             return
 
+        # 过滤乱码用户
+        valid_users = []
+        for u in users:
+            field = str(u.get("field", ""))
+            city = str(u.get("city", ""))
+            if _is_garbled(field) or _is_garbled(city):
+                print(f"[主流程] ⚠️ 跳过乱码用户 {u.get('id')}: field='{field}' city='{city}'")
+                continue
+            valid_users.append(u)
+        
+        print(f"[主流程] 有效用户 {len(valid_users)} 个，跳过 {len(users) - len(valid_users)} 个乱码")
+        
+        # 限制每批数量
+        batch = valid_users[:MAX_USERS]
+        if len(batch) < len(valid_users):
+            print(f"[主流程] 限制本批处理 {MAX_USERS} 个用户，剩余 {len(valid_users) - MAX_USERS} 个留待下次")
+
         success_count = 0
         fail_count = 0
         generated_reports = []
 
-        for u in users:
+        for u in batch:
             try:
                 jobs = generate_recommendations(u)
                 saved = save_recommendations(u["id"], jobs)
