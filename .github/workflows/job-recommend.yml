@@ -1,9 +1,9 @@
-name: 岗位招聘信息爬取 [已暂停 — 改用本地定时任务]
+name: 岗位招聘信息爬取 [GitHub Actions + 本地双轨]
 
 on:
-  # schedule:
-  #   # 每8小时运行一次（UTC时间）— 已暂停，改用本地 Windows 定时任务
-  #   - cron: '0 */8 * * *'
+  schedule:
+    # 每8小时运行一次（UTC时间）= 北京时间 8:00 / 16:00 / 00:00
+    - cron: '0 */8 * * *'
   workflow_dispatch: # 支持手动触发
 
 jobs:
@@ -32,3 +32,14 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python scripts/recommend_jobs.py
+
+      - name: 上传爬取结果（HTML报告 + JSON数据）
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crawl-results-${{ github.run_id }}
+          path: |
+            crawl-report-*.html
+            jobs_result_*.json
+            crawl-output-*.log
+          retention-days: 7

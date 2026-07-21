@@ -137,6 +137,7 @@ NATIONAL_SOE_SOURCES = [
     {
         "name": "中国联通",
         "urls": [
+            "https://chinaunicom.zhiye.com/",
             "https://hr.chinaunicom.cn/",
         ],
         "wechat_name": "中国联通招聘",
@@ -166,6 +167,7 @@ NATIONAL_SOE_SOURCES = [
     {
         "name": "中国中铁",
         "urls": [
+            "https://www.crecg.com/",
             "https://www.crecg.com.cn/",
         ],
         "wechat_name": "中国中铁招聘",
@@ -173,6 +175,8 @@ NATIONAL_SOE_SOURCES = [
     {
         "name": "中粮集团",
         "urls": [
+            "https://cofco-campus.zhiye.com/",
+            "http://campus.51job.com/cofco/",
             "https://cofco.zhiye.com/",
         ],
         "wechat_name": "中粮招聘",
@@ -207,7 +211,7 @@ LOCAL_SOE_MAP = {
     "长沙": [
         {"name": "长沙银行", "urls": ["https://cscb.zhiye.com/", "https://www.cscb.cn/"]},
         {"name": "湖南银行", "urls": ["https://www.hunan-bank.com/96599/gywx/rczp/index.shtml", "https://www.hunan-bank.com/"]},
-        {"name": "湖南建投集团", "urls": ["https://www.hnjg.com.cn/"]},
+        {"name": "湖南建投集团", "urls": ["https://www.hncig.cn/channel/29080.html", "https://www.hncig.cn/", "https://www.hnjg.com.cn/"]},
         {"name": "兴湘集团", "urls": ["https://www.hnxtg.com/"]},
         {"name": "湖南高速集团", "urls": ["https://www.hngs.net/"]},
         {"name": "长沙轨交集团", "urls": ["https://www.hncsmtr.com/"]},
@@ -332,6 +336,38 @@ def _safe_request(url, method="GET", headers=None, json_body=None, timeout=REQUE
                 resp.raise_for_status()
                 return resp
             except Exception as e2:
+                # ★ SSL验证跳过也失败了 → 尝试启用旧版SSL重协商（OP_LEGACY_SERVER_CONNECT）
+                err_s2 = str(e2)
+                if any(kw in err_s2 for kw in ["UNSAFE_LEGACY", "SSL", "CERTIFICATE", "sslv3"]):
+                    print(f"  [INFO] 旧版SSL服务器，启用LEGACY重协商重试: {url}")
+                    try:
+                        import ssl as _ssl_module
+                        from requests.adapters import HTTPAdapter
+                        from urllib3.poolmanager import PoolManager
+
+                        class _LegacySSLAdapter(HTTPAdapter):
+                            def init_poolmanager(self, *a, **kw):
+                                ctx = _ssl_module.create_default_context()
+                                ctx.check_hostname = False
+                                ctx.verify_mode = _ssl_module.CERT_NONE
+                                # OP_LEGACY_SERVER_CONNECT = 0x4
+                                ctx.options |= 0x4
+                                kw['ssl_context'] = ctx
+                                return super().init_poolmanager(*a, **kw)
+
+                        s = requests.Session()
+                        s.mount("https://", _LegacySSLAdapter())
+                        s.mount("http://", HTTPAdapter())
+                        if method.upper() == "POST":
+                            resp = s.post(url, headers=default_headers, json=json_body, timeout=timeout)
+                        else:
+                            resp = s.get(url, headers=default_headers, timeout=timeout)
+                        resp.raise_for_status()
+                        s.close()
+                        return resp
+                    except Exception as e3:
+                        print(f"  [WARNING] LegacySSL重试后仍失败: {url} - {e3}")
+                        return None
                 print(f"  [WARNING] SSL跳过验证后仍失败: {url} - {e2}")
                 return None
         print(f"  [WARNING] 连接错误: {url} - {e}")
@@ -2391,16 +2427,19 @@ def _check_wechat_account_verified(page, article_url):
 
 def crawl_wechat_sogou(keyword, city=None):
     """
-    ★ 通过搜狗微信搜索大量爬取国企招聘文章。
-    不局限于官方招聘网站，全面覆盖国企微信公众号发布的招聘信息。
+    ★ 通过 Sogou 普通网页搜索发现微信公众号招聘文章。
+    
+    ★★★ 搜狗微信搜索已被验证码反爬封锁（2026-07-19 起生效），改用 Sogou 普通网页搜索 + mp.weixin.qq.com 链接检测。
 
     搜索策略：
     1. 央企 + 城市：中石油长沙招聘、南方电网长沙招聘...
     2. 地方国企 + 城市：长沙银行招聘、湖南银行招聘...
     3. 通用：长沙 国企招聘、Python开发 招聘 长沙
-    4. 每个词取 5 篇文章，去重后返回
+    4. 每个词取 mp.weixin.qq.com 链接，去重后返回
+    5. 使用 Playwright 渲染避开搜狗反爬
     """
-    print(f"\n[微信公众号] ★ 搜狗微信搜索（覆盖央企+地方国企公众号），关键词: {keyword}，城市: {city}")
+    print(f"\n[微信公众号] ★ Sogou网页搜索（微信文章链接检测），关键词: {keyword}，城市: {city}")
+    print(f"  ★ 搜狗微信搜索已被验证码封锁，改用普通搜索引擎发现微信文章")
 
     city_key = (city or "").replace("市", "").strip()
     local_soenames = [s["name"] for s in LOCAL_SOE_MAP.get(city_key, [])]
@@ -2422,158 +2461,262 @@ def crawl_wechat_sogou(keyword, city=None):
         search_terms.append(f"{city} 国企 招聘")
         search_terms.append(f"{city} 央企 招聘")
         search_terms.append(f"{city} 事业单位 招聘")
+        search_terms.append(f"{city} 招聘公告")
+        search_terms.append(f"{city} 招聘信息 2026")
 
     # 3. 每个央企 + 城市组合
     for soe in NATIONAL_SOE_SOURCES:
         if city:
             search_terms.append(f"{soe['name']} {city} 招聘")
-        search_terms.append(f"{soe['name']} 招聘")
+        search_terms.append(f"{soe['name']} 招聘公告")
 
     # 4. 每个地方国企
     for name in local_soenames:
-        search_terms.append(f"{name} 招聘")
+        search_terms.append(f"{name} 招聘公告")
         if city:
-            search_terms.append(f"{name} {city}")
+            search_terms.append(f"{name} {city} 招聘")
 
-    # 去重并限制（最多30条搜索，足够多）
+    # 去重并限制（最多30条搜索）
     search_terms = list(dict.fromkeys(search_terms))[:30]
 
     results = []
-    headers = {
-        "User-Agent": COMMON_UA,
-        "Referer": "https://weixin.sogou.com/",
-    }
-
-    # 去重用
     seen_titles = set()
+    _STOP_AFTER_N_RESULTS = 40  # 累计40篇就停
 
-    for term in search_terms:
-        if len(seen_titles) >= 40:  # 凑够40篇就停
-            print(f"  [微信搜索] 已收集 {len(seen_titles)} 篇，停止搜索")
-            break
+    # 使用 Playwright 渲染搜狗普通网页搜索（比 requests 能绕过基础反爬）
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [微信公众号] Playwright 未安装，跳过微信文章搜索")
+        return []
 
-        encoded_term = urllib.parse.quote(term)
-        search_url = f"https://weixin.sogou.com/weixin?type=2&query={encoded_term}"
-
-        resp = _safe_request(search_url, headers=headers)
-        if not resp:
-            _random_delay()
-            continue
-
-        try:
-            resp.encoding = resp.apparent_encoding or "utf-8"
-            soup = BeautifulSoup(resp.text, "lxml")
-
-            articles = soup.select(
-                ".news-list li, .news-box li, .results li, "
-                "[class*='news-item'], [class*='article-item'], "
-                "div.txt-box, div.news-box > div"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox",
+                      "--disable-blink-features=AutomationControlled",
+                      "--ignore-certificate-errors"],
             )
+            context = browser.new_context(
+                user_agent=COMMON_UA, viewport={"width": 1920, "height": 1080},
+                locale="zh-CN", ignore_https_errors=True,
+            )
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {}, app: {} };
+            """)
+            page = context.new_page()
 
-            found = 0
-            for article in articles:
-                if found >= 5:
+            for term in search_terms:
+                if len(seen_titles) >= _STOP_AFTER_N_RESULTS:
+                    print(f"  [微信搜索] 已收集 {len(seen_titles)} 篇，停止搜索")
                     break
+
+                encoded_term = urllib.parse.quote(term)
+                # ★ 使用 Sogou 普通网页搜索，而非微信专用搜索
+                search_url = f"https://www.sogou.com/web?query={encoded_term}"
+
                 try:
-                    # 记录文章时间文本（搜狗 HTML 中时间不易可靠解析，
-                    # 真正的时效性过滤在 Playwright 获取文章页面时执行）
-                    time_el = article.select_one(
-                        ".s3, .s4, [class*='p-time'], [class*='date'], "
-                        "span:last-of-type"
-                    )
-                    publish_time_str = time_el.get_text(strip=True) if time_el else ""
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+                    page.wait_for_timeout(2000)  # 等 JS 渲染完成
 
-                    title_el = article.select_one(
-                        "h3 a, h4 a, .tit a, [class*='title'] a, a[target='_blank']"
-                    )
-                    title = title_el.get_text(strip=True) if title_el else ""
-                    href = title_el.get("href", "") if title_el else ""
+                    html = page.content()
+                    soup = BeautifulSoup(html, "lxml")
 
-                    if not title or len(title) < 5:
-                        continue
+                    # ★ 查找所有 mp.weixin.qq.com 链接
+                    wechat_links = []
+                    all_as = soup.select("a[href]")
+                    for a in all_as:
+                        href = a.get("href", "")
+                        if "mp.weixin.qq.com" in href:
+                            link_text = a.get_text(strip=True)
+                            # 过滤空文本和短文本
+                            if link_text and len(link_text) >= 4:
+                                wechat_links.append({
+                                    "title": link_text,
+                                    "href": href,
+                                })
 
-                    # 去重
-                    title_key = title[:50]
-                    if title_key in seen_titles:
-                        continue
-                    seen_titles.add(title_key)
+                    # 也尝试在 parent/sibling 元素中提取更多上下文
+                    print(f"  [微信搜索] 「{term}」→ 发现 {len(wechat_links)} 个微信文章链接")
 
-                    summary_el = article.select_one(
-                        "p.txt-info, .s-p, [class*='summary'], [class*='desc'], p"
-                    )
-                    summary = summary_el.get_text(strip=True) if summary_el else ""
+                    # 如果链接文本不够好，尝试从附近元素提取标题
+                    if len(wechat_links) <= 2:
+                        # 尝试更宽泛的搜索
+                        wechat_links_extra = []
+                        for a in all_as:
+                            href = a.get("href", "")
+                            if "mp.weixin.qq.com" in href:
+                                link_text = a.get_text(strip=True)
+                                if not link_text or len(link_text) < 4:
+                                    # 从父元素获取文本
+                                    parent = a.parent
+                                    if parent:
+                                        parent_text = parent.get_text(strip=True)[:100]
+                                        if parent_text and len(parent_text) >= 4:
+                                            link_text = parent_text
+                                if link_text and len(link_text) >= 4:
+                                    wechat_links_extra.append({
+                                        "title": link_text,
+                                        "href": href,
+                                    })
+                        if wechat_links_extra:
+                            wechat_links = wechat_links_extra
 
-                    account_el = article.select_one(
-                        ".account, .s2, [class*='account'], [class*='author'], .gzh-box .tit"
-                    )
-                    account_name = account_el.get_text(strip=True) if account_el else ""
-
-                    if href and not href.startswith("http"):
-                        href = "https://weixin.sogou.com" + href
-
-                    # 判断是否包含招聘相关内容
-                    recruit_kw = ["招聘", "岗位", "职位", "招录", "招考", "招新", "人才"]
-                    full_text = title + summary
-                    if not any(kw in full_text for kw in recruit_kw):
-                        continue
-
-                    # 尝试从标题/摘要中提取公司名
-                    company_name = account_name or "国企公众号"
-                    for soe in NATIONAL_SOE_SOURCES:
-                        if soe["name"] in title or soe["name"] in summary:
-                            company_name = soe["name"]
+                    found = 0
+                    for wl in wechat_links:
+                        if found >= 5:  # 每个搜索词最多取5篇（严格过滤后实际招聘文章有限）
                             break
-                    if company_name == account_name or company_name == "国企公众号":
-                        for local_name in local_soenames:
-                            if local_name in title or local_name in summary:
-                                company_name = local_name
+
+                        title = wl["title"]
+                        href = wl["href"]
+
+                        if not title or len(title) < 5:
+                            continue
+
+                        # 去重（基于标题前50字符）
+                        title_key = title[:50]
+                        if title_key in seen_titles:
+                            continue
+                        seen_titles.add(title_key)
+
+                        # ★★★ 严格过滤策略 ★★★
+                        # 第1层：先排除明显不相关内容
+                        _skip_prefix = ["广告", "推广", "充值", "会员", "下载",
+                                        "app", "APP", "二维码", "关注公众号",
+                                        "扫码", "小程序", "学完", "速看", "速存",
+                                        "收藏!", "收藏！", "建议收藏", "建议收藏！"]
+                        if any(title.startswith(kw) for kw in _skip_prefix):
+                            continue
+
+                        # 第2层：排除公考培训/备考/经验分享类
+                        _exam_kw = ["考试培训", "公考培训", "考公培训",
+                                    "辅导班", "培训班", "备考指南", "备考攻略",
+                                    "备考经验", "公考之路", "公考经验",
+                                    "公务员考试", "公考备考", "考公备考",
+                                    "面试经验", "面试技巧", "面试方法",
+                                    "面试备考", "面试真题", "笔试真题",
+                                    "历年真题", "真题解析", "真题汇总",
+                                    "高分技巧", "高分经验", "上岸经验",
+                                    "上岸分享", "上岸攻略", "成公经验",
+                                    "考公经验", "考编经验", "行测",
+                                    "申论", "时政热点", "时政汇总",
+                                    "公考干货", "考公干货", "考公攻略",
+                                    "如何备考", "怎么备考", "怎么复习",
+                                    "复习经验", "复习攻略", "复习方法",
+                                    "学习方法", "学习计划", "备考计划",
+                                    "考公人", "考公党", "公考人", "公考党",
+                                    "在职牛马", "在职考生", "在职备考",
+                                    "上岸考生", "上岸学长", "上岸学姐",
+                                    "已上岸", "成功上岸", "一次上岸",
+                                    "笔记分享", "资料分享", "资源分享",
+                                    "资料汇总", "资料合集", "备考资料",
+                                    "考公资料", "公考资料", "免费领取",
+                                    "限时领取", "免费分享", "速领",
+                                    # 培训机构/自媒体
+                                    "中公教育", "华图教育", "粉笔公考",
+                                    "粉笔教育", "腰果公考", "步知公考",
+                                    "半月谈", "超格公考", "青京公考",
+                                    "得政", "湘麓法源", "娄上双星",
+                                    "娄底中公", "湖南中公", "长沙中公"]
+                        if any(kw in title for kw in _exam_kw):
+                            continue
+
+                        # 第3层：必须包含真实招聘关键词
+                        _hard_recruit_kw = ["招聘", "招录", "招考公告", "招聘公告",
+                                            "人才引进", "招才引智", "校园招聘",
+                                            "社会招聘", "春季招聘", "秋季招聘",
+                                            "招聘简章", "招聘计划", "招聘岗位",
+                                            "岗位需求", "招贤纳士", "诚聘",
+                                            "招新", "纳新", "报名公告",
+                                            "录用公示", "录用名单", "拟录用",
+                                            "录用公告", "录用人员"]
+                        if not any(kw in title for kw in _hard_recruit_kw):
+                            # 放宽：如果包含"国企"+"公告"也算
+                            if not ("国企" in title and "公告" in title):
+                                continue
+
+                        # 第4层：排除 Sogou 搜索结果元数据（非真实文章标题）
+                        _meta_patterns = ["·微信公众号", "·公众号", "投诉举报",
+                                          "用户协议", "隐私政策", "服务协议",
+                                          "Copyright", "©", "ICP"]
+                        if any(kw in title for kw in _meta_patterns):
+                            continue
+
+                        # 尝试从标题中提取公司名
+                        company_name = "国企公众号"
+                        for soe in NATIONAL_SOE_SOURCES:
+                            if soe["name"] in title:
+                                company_name = soe["name"]
                                 break
+                        if company_name == "国企公众号":
+                            for local_name in local_soenames:
+                                if local_name in title:
+                                    company_name = local_name
+                                    break
 
-                    detected_city = _detect_city_from_text(title + " " + summary)
-                    work_location = detected_city if detected_city else (city or "全国")
+                        # 检测城市
+                        detected_city = _detect_city_from_text(title)
+                        work_location = detected_city if detected_city else (city or "全国")
 
-                    job_obj = {
-                        "job_title": title[:80],
-                        "company": company_name,
-                        "enterprise_type": "国企",
-                        "detail_link": href or search_url,
-                        "salary_range": "详见公告",
-                        "responsibilities": summary[:200] if summary else "详见岗位详情页",
-                        "requirements": "详见岗位详情页",
-                        "benefits": "国企福利待遇（五险二金/年终奖/带薪年假）",
-                        "development": "国企平台稳定，晋升通道清晰，福利保障完善",
-                        "work_location": work_location,
-                        "source": f"微信公众号-{account_name}（真实数据）" if account_name else "微信公众号（真实数据）",
-                        "search_keyword": keyword,
-                        "_raw_contents": summary,
-                        "_raw_edu": "",
-                        "_raw_exp": "",
-                        # 用于后续资质校验和时效过滤
-                        "_publish_time_str": publish_time_str,
-                        "_account_name": account_name,
-                    }
-                    results.append(job_obj)
-                    found += 1
-                except Exception:
-                    continue
+                        # 从URL中提取可能的账号名
+                        account_name = ""
+                        try:
+                            # mp.weixin.qq.com/s?src=11&timestamp=... 这种格式没有账号名
+                            # 实际的公众号文章URL是 mp.weixin.qq.com/s?__biz=... 格式
+                            account_name = title.split("·")[0].strip() if "·" in title else ""
+                        except Exception:
+                            pass
 
-            if found > 0:
-                print(f"  [微信搜索] 「{term}」→ {found} 篇新文章 (累计 {len(seen_titles)} 篇)")
+                        # 确保 href 是完整URL
+                        if href and not href.startswith("http"):
+                            href = "https://" + href.lstrip("/")
 
-        except Exception as e:
-            print(f"    [微信搜索] 解析失败 ({term}): {e}")
+                        job_obj = {
+                            "job_title": title[:80],
+                            "company": company_name,
+                            "enterprise_type": "国企",
+                            "detail_link": href or search_url,
+                            "salary_range": "详见公告",
+                            "responsibilities": "详见岗位详情页",
+                            "requirements": "详见岗位详情页",
+                            "benefits": "国企福利待遇（五险二金/年终奖/带薪年假）",
+                            "development": "国企平台稳定，晋升通道清晰",
+                            "work_location": work_location,
+                            "source": f"微信公众号-Sogou搜索（真实数据）",
+                            "search_keyword": keyword,
+                            "_raw_contents": "",
+                            "_raw_edu": "",
+                            "_raw_exp": "",
+                            "_publish_time_str": "",
+                            "_account_name": account_name or title[:20],
+                        }
+                        results.append(job_obj)
+                        found += 1
 
-        _random_delay()
+                    if found > 0:
+                        print(f"    → 收录 {found} 篇 (累计 {len(seen_titles)} 篇)")
 
-    # 尝试用 AI 从文章正文中提取结构化岗位信息
-    if _ARK_API_KEY and _ARK_ENDPOINT and results:
+                except Exception as e:
+                    print(f"    [微信搜索] 「{term}」导航失败: {e}")
+
+                _random_delay()
+
+            browser.close()
+
+    except Exception as e:
+        print(f"  [微信公众号] Playwright 搜索失败: {e}")
+        return []
+
+    # 尝试用 Playwright 获取文章正文 + AI 提取结构化岗位信息
+    if results and _ARK_API_KEY and _ARK_ENDPOINT:
         ai_jobs = _extract_from_wechat_articles_with_ai(results, keyword, city)
         if ai_jobs:
             print(f"[微信公众号] ★ AI 从文章正文提取到 {len(ai_jobs)} 个结构化岗位")
-            # AI 提取的岗位替换原有浅层结果（标题摘要太粗糙）
             results = ai_jobs
         else:
-            print(f"[微信公众号] ★ AI 未提取到结构化岗位，保留原始结果")
+            print(f"[微信公众号] ★ AI 未提取到结构化岗位，保留搜索结果")
 
     print(f"[微信公众号] ★ 总计 {len(results)} 篇招聘文章（来自 {len(search_terms)} 个搜索词）")
     return results
@@ -3126,16 +3269,12 @@ def generate_recommendations(user):
         job.pop("_raw_edu", None)
         job.pop("_raw_exp", None)
 
-    # 按匹配度过滤：>=50 分才推荐，不足5条时放宽到 >=30
-    min_score = 50
-    qualified = [j for j in filtered if j.get("match_score", 0) >= min_score]
-    if len(qualified) < 5:
-        min_score = 30
-        qualified = [j for j in filtered if j.get("match_score", 0) >= min_score]
-        print(f"\n⚠️ >=50分仅 {len([j for j in filtered if j.get('match_score',0) >= 50])} 条，放宽到 >=30 分")
+    # 按匹配度过滤：>=65% 才推荐，最多10条
+    MIN_MATCH_SCORE = 65
+    MAX_RESULTS = 10
+    qualified = [j for j in filtered if j.get("match_score", 0) >= MIN_MATCH_SCORE]
 
-    # 限制返回数量（最多20条）
-    result = qualified[:20]
+    result = qualified[:MAX_RESULTS]
 
     print("\n" + "=" * 60)
     print(f"岗位推荐生成完成！共 {len(result)} 条岗位")
