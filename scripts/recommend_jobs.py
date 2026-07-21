@@ -3922,7 +3922,7 @@ def _is_garbled(text):
     return False
 
 def main():
-    MAX_USERS = 12  # 每批最多处理12个用户（约60分钟）
+    MAX_USERS = 6  # 每批最多处理6个用户（约30分钟，避免超时）
     try:
         users = fetch_users()
         print(f"[主流程] 共读取到 {len(users)} 个用户")
