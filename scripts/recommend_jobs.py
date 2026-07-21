@@ -73,39 +73,53 @@ def fetch_users():
 
 def save_recommendations(user_id: int, jobs: list[dict]):
     """通过 REST API 写入 job_recommendations 表"""
+    _save_headers = dict(_SUPABASE_HEADERS)
+    _save_headers["Prefer"] = "return=minimal"
+    
     # 先删除旧推荐
-    requests.delete(
+    resp_del = requests.delete(
         f"{SUPABASE_URL}/rest/v1/job_recommendations?user_id=eq.{user_id}",
-        headers=_SUPABASE_HEADERS, timeout=30,
+        headers=_save_headers, timeout=30,
     )
+    if resp_del.status_code not in (200, 204):
+        print(f"  [Supabase] 删除旧推荐失败: {resp_del.status_code} {resp_del.text[:200]}")
+    
     saved = []
-    for j in jobs:
+    for idx, j in enumerate(jobs):
         row = {
             "user_id": user_id,
-            "job_title": j.get("job_title", ""),
-            "company": j.get("company", ""),
-            "enterprise_type": j.get("enterprise_type", ""),
+            "job_title": j.get("job_title", "")[:500],
+            "company": j.get("company", "")[:200],
+            "enterprise_type": j.get("enterprise_type", "")[:50],
             "match_score": j.get("match_score", 0),
-            "detail_link": j.get("detail_link", ""),
-            "salary_range": j.get("salary_range", ""),
-            "responsibilities": j.get("responsibilities", ""),
-            "requirements": j.get("requirements", ""),
-            "benefits": j.get("benefits", ""),
-            "development": j.get("development", ""),
-            "work_location": j.get("work_location", ""),
-            "source": j.get("source", ""),
-            "search_links": json.dumps(j.get("search_links", []), ensure_ascii=False),
-            "search_keyword": j.get("search_keyword", ""),
+            "detail_link": j.get("detail_link", "")[:500],
+            "salary_range": j.get("salary_range", "")[:100],
+            "responsibilities": (j.get("responsibilities", "") or "")[:2000],
+            "requirements": (j.get("requirements", "") or "")[:2000],
+            "benefits": (j.get("benefits", "") or "")[:500],
+            "development": (j.get("development", "") or "")[:500],
+            "work_location": j.get("work_location", "")[:100],
+            "source": j.get("source", "")[:200],
+            "search_links": json.dumps(j.get("search_links", []), ensure_ascii=False)[:4000],
+            "search_keyword": j.get("search_keyword", "")[:200],
         }
         try:
             resp = requests.post(
                 f"{SUPABASE_URL}/rest/v1/job_recommendations",
-                headers=_SUPABASE_HEADERS, json=row, timeout=30,
+                headers=_save_headers, json=row, timeout=30,
             )
-            if resp.status_code in (200, 201):
+            if resp.status_code in (200, 201, 204):
                 saved.append(row)
+            else:
+                if idx < 2:  # 只打印前2条的详细错误
+                    print(f"  [Supabase] 写入岗位{idx+1}失败: {resp.status_code} {resp.text[:300]}")
         except Exception as e:
-            print(f"  [Supabase] 写入失败: {e}")
+            if idx < 2:
+                print(f"  [Supabase] 写入岗位{idx+1}异常: {e}")
+    if saved:
+        print(f"  [Supabase] 成功写入 {len(saved)}/{len(jobs)} 条岗位")
+    else:
+        print(f"  [Supabase] ⚠️ 全部 {len(jobs)} 条写入失败！检查表结构/RLS/字段类型")
     return saved
 
 # 每个网站爬取超时
